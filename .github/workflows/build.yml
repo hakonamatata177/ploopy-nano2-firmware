@@ -1,0 +1,31 @@
+name: Build firmware
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: qmkfm/qmk_firmware
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Copy keymap into QMK
+        run: |
+          mkdir -p /qmk_firmware/keyboards/ploopyco/nano_2/keymaps/custom
+          cp config.h /qmk_firmware/keyboards/ploopyco/nano_2/keymaps/custom/
+          cp keymap.c /qmk_firmware/keyboards/ploopyco/nano_2/keymaps/custom/
+
+      - name: Build
+        working-directory: /qmk_firmware
+        run: qmk compile -kb ploopyco/nano_2/rev2_003 -km custom
+
+      - name: Upload .uf2
+        uses: actions/upload-artifact@v4
+        with:
+          name: ploopy-nano2-custom-${{ github.sha }}
+          path: /qmk_firmware/ploopyco_nano_2_rev2_003_custom.uf2
