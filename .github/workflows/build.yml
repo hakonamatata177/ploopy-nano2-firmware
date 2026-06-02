@@ -43,8 +43,11 @@ jobs:
           qmk config user.qmk_home=$HOME/qmk_firmware
           qmk compile -kb ploopyco/nano_2/rev2_003 -km custom
 
+      - name: Copy firmware to workspace
+        run: cp $HOME/qmk_firmware/ploopyco_nano_2_rev2_003_custom.uf2 ./firmware.uf2
+
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
           name: ploopy-nano2-custom-${{ github.sha }}
-          path: $HOME/qmk_firmware/ploopyco_nano_2_rev2_003_custom.uf2
+          path: firmware.uf2
