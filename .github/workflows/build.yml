@@ -29,7 +29,8 @@ jobs:
             lib/chibios-contrib \
             lib/pico-sdk \
             lib/printf \
-            lib/fnv
+            lib/fnv \
+            lib/lufa
 
       - name: Copy keymap
         run: |
