@@ -7,25 +7,43 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: qmkfm/qmk_firmware
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Copy keymap into QMK
+      - name: Install ARM toolchain
         run: |
-          mkdir -p /qmk_firmware/keyboards/ploopyco/nano_2/keymaps/custom
-          cp config.h /qmk_firmware/keyboards/ploopyco/nano_2/keymaps/custom/
-          cp keymap.c /qmk_firmware/keyboards/ploopyco/nano_2/keymaps/custom/
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-arm-none-eabi
+
+      - name: Install QMK CLI
+        run: pip install qmk
+
+      - name: Clone QMK firmware
+        run: |
+          git clone --depth 1 https://github.com/qmk/qmk_firmware.git $HOME/qmk_firmware
+          cd $HOME/qmk_firmware
+          git submodule update --init --depth 1 \
+            lib/chibios \
+            lib/chibios-contrib \
+            lib/pico-sdk \
+            lib/printf \
+            lib/fnv
+
+      - name: Copy keymap
+        run: |
+          mkdir -p $HOME/qmk_firmware/keyboards/ploopyco/nano_2/keymaps/custom
+          cp config.h $HOME/qmk_firmware/keyboards/ploopyco/nano_2/keymaps/custom/
+          cp keymap.c $HOME/qmk_firmware/keyboards/ploopyco/nano_2/keymaps/custom/
 
       - name: Build
-        working-directory: /qmk_firmware
-        run: qmk compile -kb ploopyco/nano_2/rev2_003 -km custom
+        run: |
+          qmk config user.qmk_home=$HOME/qmk_firmware
+          qmk compile -kb ploopyco/nano_2/rev2_003 -km custom
 
-      - name: Upload .uf2
+      - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
           name: ploopy-nano2-custom-${{ github.sha }}
-          path: /qmk_firmware/ploopyco_nano_2_rev2_003_custom.uf2
+          path: $HOME/qmk_firmware/ploopyco_nano_2_rev2_003_custom.uf2
