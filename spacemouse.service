@@ -1,0 +1,17 @@
+[Unit]
+Description=SpaceMouse 3D Navigation Daemon (Ploopy Nano 2)
+Documentation=file://%h/ploopy-nano2-firmware/README_spacemouse.md
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# %h expands to the user's home directory inside user services
+ExecStart=%h/.local/bin/spacemouse_daemon.py
+Restart=on-failure
+RestartSec=5
+# Show Python output immediately in journald instead of buffering
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=graphical-session.target
