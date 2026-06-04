@@ -3,7 +3,7 @@
 
 // Four DPI levels to cycle through (index 1 = 800 CPI is startup default)
 #define PLOOPY_DPI_OPTIONS { 400, 800, 1200, 1600 }
-#define PLOOPY_DPI_DEFAULT 1
+#define PLOOPY_DPI_DEFAULT 0
 
 // Scroll sensitivity in drag-scroll mode
 #undef PLOOPY_DRAGSCROLL_DIVISOR_H
