@@ -216,9 +216,10 @@ class SpaceMouseDaemon:
         self._drift_y = 0
 
         # Tap counting state
-        self._tap_count      = 0
+        self._tap_count       = 0
         self._press_time: float = 0.0
         self._tap_task: asyncio.Task | None = None
+        self._pre_tap_mode: str = "cursor"   # mode before optimistic single tap
 
     # ── Config helpers ───────────────────────────────────────────────────────
 
@@ -346,6 +347,7 @@ class SpaceMouseDaemon:
     # ── Tap counting ─────────────────────────────────────────────────────────
 
     async def _on_button_press(self, ts: float) -> None:
+        # Cancel any pending tap confirmation timer — a new press has arrived
         if self._tap_task:
             self._tap_task.cancel()
             self._tap_task = None
@@ -355,15 +357,46 @@ class SpaceMouseDaemon:
         duration = ts - self._press_time
 
         if duration >= self._hold_threshold:
+            # Long press — fire hold action immediately, reset tap state
             self._tap_count = 0
             action = self.config["actions"].get("hold", "exit_3d")
             self._apply_action(action)
+            log.info("Hold → %s", action)
+            return
+
+        self._tap_count += 1
+
+        if self._tap_count == 1:
+            # Optimistic: fire single tap immediately so there is zero delay.
+            # If a second tap arrives within the timeout window we undo this
+            # and let the multi-tap timer handle the final count instead.
+            self._pre_tap_mode = self.mode
+            action = self.config["actions"].get("tap_1", "scroll_toggle")
+            self._apply_action(action)
+            log.info("Tap ×1 (optimistic) → %s", action)
+            self._tap_task = asyncio.create_task(
+                self._tap_confirmed(self._tap_timeout))
         else:
-            self._tap_count += 1
+            # Second (or third) tap arrived — undo the optimistic single tap
+            # and start the normal timer to wait for the final count.
+            if self._tap_task:
+                self._tap_task.cancel()
+                self._tap_task = None
+            self._set_mode(self._pre_tap_mode)   # undo single tap
             self._tap_task = asyncio.create_task(
                 self._tap_timer(self._tap_timeout))
 
+    async def _tap_confirmed(self, delay: float) -> None:
+        """Single tap was not followed by another press — it stands."""
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        self._tap_count = 0
+        self._tap_task  = None
+
     async def _tap_timer(self, delay: float) -> None:
+        """Multi-tap: fire action once no more taps arrive within delay."""
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
@@ -378,7 +411,7 @@ class SpaceMouseDaemon:
 
     # ── Movement routing ─────────────────────────────────────────────────────
 
-    def _handle_raw_movement(self, dx: int, dy: int) -> None:
+    async def _handle_raw_movement(self, dx: int, dy: int) -> None:
         if self.mode == "cursor":
             if dx:
                 self.virtual.write(e.EV_REL, e.REL_X, dx)
@@ -411,9 +444,9 @@ class SpaceMouseDaemon:
             self._accum_x -= tick_x * div
             self._accum_y -= tick_y * div
             if tick_x or tick_y:
-                self._handle_3d_movement(tick_x, tick_y)
+                await self._handle_3d_movement(tick_x, tick_y)
 
-    def _handle_3d_movement(self, dx: int, dy: int) -> None:
+    async def _handle_3d_movement(self, dx: int, dy: int) -> None:
         profile  = get_profile(get_active_window_class())
         axis_cfg = profile[self._axis]
 
@@ -432,6 +465,11 @@ class SpaceMouseDaemon:
                     abs(self._drift_y) > self._recenter_threshold):
                 self._release_all()
                 self.virtual.syn()
+                # Wait two Wayland frames so the button-release reaches
+                # FreeCAD before the cursor warp does.  Without this sleep
+                # the warp (a separate IPC path) can arrive while the app
+                # still thinks the button is held, causing a phantom pan.
+                await asyncio.sleep(0.04)
                 self._center_cursor()
             self._hold(axis_cfg["buttons"], axis_cfg["mods"])
             if dx:
@@ -458,7 +496,7 @@ class SpaceMouseDaemon:
                 elif event.code == e.REL_Y:
                     dy = event.value
                 if dx or dy:
-                    self._handle_raw_movement(dx, dy)
+                    await self._handle_raw_movement(dx, dy)
 
     async def run(self) -> None:
         log.info("Daemon running — grabbing %d mouse device(s).", len(self._mouse_devices))
