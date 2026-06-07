@@ -47,8 +47,11 @@ jobs:
           name: firmware
           path: firmware.uf2
 
+  # ── Shared AppImage build step (reused by both AppImage jobs) ──────────────
+  # (inline; each job does its own build to avoid cross-job artifact confusion)
+
   # ── Build daemon AppImage ──────────────────────────────────────────────────
-  build-appimage:
+  build-daemon-appimage:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -81,21 +84,19 @@ jobs:
 
           cat > AppDir/spacemouse-daemon.desktop << 'DESKTOP'
           [Desktop Entry]
-          Name=Spacemouse Daemon
+          Name=SpaceMouse Daemon
           Exec=spacemouse-daemon
           Icon=spacemouse-daemon
           Type=Application
           Categories=Utility;
+          NoDisplay=true
           DESKTOP
 
-          # Minimal 64×64 blue PNG icon (no extra deps)
           python3 - << 'PYEOF'
           import struct, zlib
-
           def chunk(tag, data):
               crc = zlib.crc32(tag + data) & 0xffffffff
               return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', crc)
-
           w, h, r, g, b = 64, 64, 0, 120, 215
           raw = b''.join(b'\x00' + bytes([r, g, b] * w) for _ in range(h))
           png = (b'\x89PNG\r\n\x1a\n'
@@ -116,12 +117,82 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: appimage
+          name: daemon-appimage
           path: spacemouse-daemon-x86_64.AppImage
+
+  # ── Build config GUI AppImage ──────────────────────────────────────────────
+  build-config-appimage:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libfuse2
+
+      - name: Install Python deps
+        run: pip install pyinstaller PyQt6
+
+      - name: Bundle with PyInstaller
+        run: |
+          pyinstaller --onefile \
+            --name spacemouse-config \
+            --collect-all PyQt6 \
+            --windowed \
+            spacemouse_config_gui.py
+
+      - name: Assemble AppDir
+        run: |
+          mkdir -p AppDir/usr/bin
+          cp dist/spacemouse-config AppDir/usr/bin/
+
+          printf '#!/bin/sh\nexec "$(dirname "$0")/usr/bin/spacemouse-config" "$@"\n' \
+            > AppDir/AppRun
+          chmod +x AppDir/AppRun
+
+          cat > AppDir/spacemouse-config.desktop << 'DESKTOP'
+          [Desktop Entry]
+          Name=SpaceMouse Config
+          Comment=Configure the Ploopy SpaceMouse daemon
+          Exec=spacemouse-config
+          Icon=spacemouse-config
+          Type=Application
+          Categories=Settings;Utility;
+          Keywords=ploopy;trackball;spacemouse;3d;
+          DESKTOP
+
+          python3 - << 'PYEOF'
+          import struct, zlib
+          def chunk(tag, data):
+              crc = zlib.crc32(tag + data) & 0xffffffff
+              return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', crc)
+          w, h, r, g, b = 64, 64, 80, 160, 255
+          raw = b''.join(b'\x00' + bytes([r, g, b] * w) for _ in range(h))
+          png = (b'\x89PNG\r\n\x1a\n'
+                 + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+                 + chunk(b'IDAT', zlib.compress(raw))
+                 + chunk(b'IEND', b''))
+          open('AppDir/spacemouse-config.png', 'wb').write(png)
+          PYEOF
+
+      - name: Download appimagetool
+        run: |
+          wget -q -O appimagetool \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+
+      - name: Build AppImage
+        run: ARCH=x86_64 ./appimagetool AppDir/ spacemouse-config-x86_64.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: config-appimage
+          path: spacemouse-config-x86_64.AppImage
 
   # ── Create GitHub release ──────────────────────────────────────────────────
   release:
-    needs: [build-firmware, build-appimage]
+    needs: [build-firmware, build-daemon-appimage, build-config-appimage]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v4
@@ -130,7 +201,11 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: appimage
+          name: daemon-appimage
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: config-appimage
 
       - name: Create GitHub release
         env:
@@ -144,25 +219,46 @@ jobs:
           | File | Purpose |
           |------|---------|
           | `firmware.uf2` | Flash to Ploopy Nano 2 via USB bootloader |
-          | `spacemouse-daemon-x86_64.AppImage` | Linux x86-64 navigation daemon |
+          | `spacemouse-daemon-x86_64.AppImage` | Background daemon (run as systemd service) |
+          | `spacemouse-config-x86_64.AppImage` | GUI to configure tap actions and tuning |
 
-          ### Run the daemon
+          ### Quick install
           ```bash
-          chmod +x spacemouse-daemon-x86_64.AppImage
-          ./spacemouse-daemon-x86_64.AppImage
+          # Download both AppImages, then:
+          chmod +x spacemouse-daemon-x86_64.AppImage spacemouse-config-x86_64.AppImage
+
+          # Install daemon
+          mkdir -p ~/.local/bin
+          cp spacemouse-daemon-x86_64.AppImage ~/.local/bin/spacemouse-daemon
+          systemctl --user enable --now spacemouse
+
+          # Install config GUI (shows up in your app launcher)
+          cp spacemouse-config-x86_64.AppImage ~/.local/bin/spacemouse-config
+          mkdir -p ~/.local/share/applications
+          cat > ~/.local/share/applications/spacemouse-config.desktop << 'EOF'
+          [Desktop Entry]
+          Name=SpaceMouse Config
+          Exec=/home/$USER/.local/bin/spacemouse-config
+          Icon=preferences-system
+          Type=Application
+          Categories=Settings;Utility;
+          EOF
           ```
 
-          ### Button mapping
+          ### Button mapping (default)
           | Tap | Action |
           |-----|--------|
-          | 1 tap | Toggle scroll / pointer mode |
+          | 1 tap | Toggle scroll ↔ cursor |
           | 2 taps | Toggle 3D rotate mode (orbit) |
           | 3 taps | Toggle 3D pan mode |
           | Hold | Exit 3D mode |
+
+          Use **SpaceMouse Config** to change tap actions, move speed, and timing.
           NOTES
 
           gh release create "${{ github.ref_name }}" \
             --title "Release ${{ github.ref_name }}" \
             --notes-file notes.md \
             firmware.uf2 \
-            spacemouse-daemon-x86_64.AppImage
+            spacemouse-daemon-x86_64.AppImage \
+            spacemouse-config-x86_64.AppImage
