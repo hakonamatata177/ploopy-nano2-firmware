@@ -9,8 +9,14 @@ Firmware protocol
 -----------------
 The QMK firmware signals state changes by sending standard key presses:
 
-  F13 keypress  →  toggle 3D mode on / off
-  F14 keypress  →  cycle active axis  (0 → 1 → 2 → 0)
+  F13 keypress  →  toggle 3D rotate mode (axis 0: Rotate XY)
+  F15 keypress  →  toggle 3D pan mode    (axis 1: Translate XY)
+
+Tap mapping on the physical button:
+  1 tap   → toggle drag-scroll (handled entirely in firmware, no F-key sent)
+  2 taps  → toggle rotate mode  → F13
+  3 taps  → toggle pan mode     → F15
+  hold    → exit 3D mode (if active) → F13
 
 While 3D mode is ON the firmware suppresses normal x/y cursor movement and
 sends trackball deltas as scroll events instead:
@@ -23,6 +29,7 @@ Axes
   0  Rotate XY     – orbit / tumble the view
   1  Translate XY  – pan the view
   2  Zoom + Roll Z – zoom with V, horizontal-scroll / roll with H
+                     (not directly selectable via tap; kept for profile use)
 
 Usage
 -----
@@ -64,9 +71,9 @@ AXIS_NAMES = ["Rotate XY", "Translate XY", "Zoom + Roll Z"]
 # Increase if 3D navigation feels sluggish; decrease if it jumps too fast.
 MOVE_SCALE = 14
 
-# evdev key codes for F13 / F14
-KEY_F13 = e.KEY_F13   # 183
-KEY_F14 = e.KEY_F14   # 184
+# evdev key codes used by the firmware tap protocol
+KEY_F13 = e.KEY_F13   # 183 – double tap: toggle rotate mode (axis 0)
+KEY_F15 = e.KEY_F15   # 185 – triple tap: toggle pan mode    (axis 1)
 
 # ─── Application profiles ─────────────────────────────────────────────────────
 #
@@ -135,6 +142,12 @@ def find_ploopy_devices() -> list[InputDevice]:
             if "ploopy" in name_lower or "nano 2" in name_lower:
                 log.info("Found Ploopy device: %s  (%s)", dev.name, path)
                 found.append(dev)
+        except PermissionError:
+            log.warning(
+                "Permission denied on %s — add yourself to the 'input' group:\n"
+                "  sudo usermod -aG input $USER  (then log out and back in)",
+                path,
+            )
         except Exception:
             pass
     return found
@@ -195,10 +208,53 @@ class SpaceMouseDaemon:
         self.virtual = virtual
         self.mode_3d  = False
         self.axis     = 0
-        # Track which buttons / modifiers are currently held so we can
-        # release them cleanly when the axis or mode changes.
         self._held_buttons: list[int] = []
         self._held_mods:    list[int] = []
+        self._mouse_devices = [d for d in devices if e.EV_REL in d.capabilities()]
+
+    # ── Cursor centering ─────────────────────────────────────────────────────
+
+    def _center_cursor(self) -> None:
+        # Warp cursor to the centre of the focused window so orbit/pan starts
+        # far from any screen edge. Called when entering 3D mode or cycling
+        # axes — at these moments no button is held, so FreeCAD ignores the
+        # resulting wl_pointer.motion and no counter-movement is injected.
+        try:
+            result = subprocess.run(
+                ["hyprctl", "activewindow", "-j"],
+                capture_output=True, text=True, timeout=0.2,
+            )
+            data = json.loads(result.stdout)
+            at   = data.get("at",   [0, 0])
+            size = data.get("size", [1920, 1080])
+            cx   = at[0] + size[0] // 2
+            cy   = at[1] + size[1] // 2
+            subprocess.run(
+                ["hyprctl", "dispatch", "movecursor", str(cx), str(cy)],
+                capture_output=True, timeout=0.1,
+            )
+            log.debug("Cursor centred at (%d, %d)", cx, cy)
+        except Exception:
+            pass
+
+    # ── Grab helpers ────────────────────────────────────────────────────────
+
+    def _set_grab(self, grab: bool) -> None:
+        """Exclusively grab (or release) the mouse HID nodes.
+
+        Grab prevents raw scroll events from leaking to the focused app
+        while 3D mode is active; ungrab restores normal pass-through.
+        """
+        for dev in self._mouse_devices:
+            try:
+                if grab:
+                    dev.grab()
+                    log.info("Grabbed %s", dev.path)
+                else:
+                    dev.ungrab()
+                    log.info("Released %s", dev.path)
+            except Exception as ex:
+                log.warning("grab(%s) FAILED on %s: %s — raw scroll may leak", grab, dev.path, ex)
 
     # ── Virtual device helpers ───────────────────────────────────────────────
 
@@ -263,12 +319,11 @@ class SpaceMouseDaemon:
                 self.virtual.write(e.EV_REL, e.REL_HWHEEL, dx)
             self.virtual.syn()
         else:
-            # Axes 0 / 1: hold button combo and inject virtual mouse movement
+            # Axes 0 / 1: hold button combo and inject virtual mouse movement.
             self._hold(axis_cfg["buttons"], axis_cfg["mods"])
             if dx != 0:
                 self.virtual.write(e.EV_REL, e.REL_X,  dx * MOVE_SCALE)
             if dy != 0:
-                # Invert Y so that "trackball up" = "view moves up"
                 self.virtual.write(e.EV_REL, e.REL_Y, -dy * MOVE_SCALE)
             self.virtual.syn()
 
@@ -279,19 +334,32 @@ class SpaceMouseDaemon:
         async for event in dev.async_read_loop():
             if event.type == e.EV_KEY and event.value == 1:  # key-down only
                 if event.code == KEY_F13:
-                    # F13 = toggle 3D mode on/off
-                    self.mode_3d = not self.mode_3d
-                    self._release_all()
-                    log.info("3D mode %s", "ON  (axis 0: %s)" % AXIS_NAMES[0]
-                             if self.mode_3d else "OFF")
+                    # Double tap: toggle 3D rotation mode (axis 0)
                     if self.mode_3d:
+                        self.mode_3d = False
+                        self._release_all()
+                        self._set_grab(False)
+                        log.info("3D mode OFF")
+                    else:
+                        self.mode_3d = True
                         self.axis = 0
+                        self._set_grab(True)
+                        self._center_cursor()
+                        log.info("3D mode ON  (axis 0: %s)", AXIS_NAMES[0])
 
-                elif event.code == KEY_F14 and self.mode_3d:
-                    # F14 = cycle axis
-                    self.axis = (self.axis + 1) % 3
-                    self._release_all()
-                    log.info("Axis → %d: %s", self.axis, AXIS_NAMES[self.axis])
+                elif event.code == KEY_F15:
+                    # Triple tap: toggle 3D pan mode (axis 1)
+                    if self.mode_3d:
+                        self.mode_3d = False
+                        self._release_all()
+                        self._set_grab(False)
+                        log.info("3D mode OFF")
+                    else:
+                        self.mode_3d = True
+                        self.axis = 1
+                        self._set_grab(True)
+                        self._center_cursor()
+                        log.info("3D mode ON  (axis 1: %s)", AXIS_NAMES[1])
 
             elif event.type == e.EV_REL and self.mode_3d:
                 dx, dy = 0, 0
@@ -335,7 +403,8 @@ async def main() -> None:
         sys.exit(1)
 
     virtual = create_virtual_device()
-    log.info("Virtual uinput device created: %s", virtual.device.path)
+    device_path = virtual.device.path if virtual.device else f"fd={virtual.fd}"
+    log.info("Virtual uinput device created: %s", device_path)
 
     daemon = SpaceMouseDaemon(devices, virtual)
     try:

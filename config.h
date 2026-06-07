@@ -16,3 +16,6 @@
 
 // Hold time (ms) to trigger hold action instead of tap
 #define HOLD_THRESHOLD 400
+
+// Window (ms) after a tap to wait for an additional tap (for multi-tap detection)
+#define TAP_TIMEOUT 250
