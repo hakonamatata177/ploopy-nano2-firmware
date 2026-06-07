@@ -13,6 +13,7 @@ static uint16_t btn_press_timer = 0;  // when the button went down
 static uint16_t tap_timer       = 0;  // time of last tap release
 static uint8_t  tap_count       = 0;  // taps accumulated in current multi-tap sequence
 static bool     btn_held        = false;
+static bool     scroll_mode     = false; // true while drag-scroll is active
 static bool     mode_3d         = false; // true while 3D mode is active (suppresses cursor)
 static uint8_t  axis_3d         = 0;     // 0 = rotate, 1 = pan
 
@@ -71,35 +72,39 @@ void matrix_scan_user(void) {
         switch (tap_count) {
             case 1:
                 if (mode_3d) {
-                    // In 3D mode: single tap exits to cursor mode
+                    // In 3D mode: exit to cursor
                     mode_3d = false;
                     tap_code(axis_3d == 0 ? KC_F13 : KC_F15);
                 } else {
+                    // Toggle scroll on/off
                     toggle_drag_scroll();
+                    scroll_mode = !scroll_mode;
                 }
                 break;
             case 2:
                 if (!mode_3d) {
-                    // Off → enter rotate
+                    // Cursor or scroll → enter rotate (turn scroll off first)
+                    if (scroll_mode) { toggle_drag_scroll(); scroll_mode = false; }
                     mode_3d = true; axis_3d = 0;
                 } else if (axis_3d == 0) {
                     // Already rotating → exit
                     mode_3d = false;
                 } else {
-                    // Panning → switch to rotate (stay in 3D)
+                    // Panning → switch to rotate
                     axis_3d = 0;
                 }
                 tap_code(KC_F13);
                 break;
             default: // 3+ taps
                 if (!mode_3d) {
-                    // Off → enter pan
+                    // Cursor or scroll → enter pan (turn scroll off first)
+                    if (scroll_mode) { toggle_drag_scroll(); scroll_mode = false; }
                     mode_3d = true; axis_3d = 1;
                 } else if (axis_3d == 1) {
                     // Already panning → exit
                     mode_3d = false;
                 } else {
-                    // Rotating → switch to pan (stay in 3D)
+                    // Rotating → switch to pan
                     axis_3d = 1;
                 }
                 tap_code(KC_F15);
