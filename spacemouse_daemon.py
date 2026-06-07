@@ -2,39 +2,36 @@
 """
 spacemouse_daemon.py
 ====================
-Converts a Ploopy Nano 2 trackball into a 6-axis 3D-navigation device for
-FreeCAD, Blender, and Fusion 360 (via Bottles) on Wayland/Linux.
+Converts a Ploopy Nano 2 trackball into a configurable 3D-navigation device.
 
-Firmware protocol
------------------
-The QMK firmware signals state changes by sending standard key presses:
+Firmware protocol (minimal firmware, never needs reflashing)
+------------------------------------------------------------
+The QMK firmware sends a single signal:
+  F13 key-down   →  button pressed
+  F13 key-up     →  button released
 
-  F13 keypress  →  toggle 3D rotate mode (axis 0: Rotate XY)
-  F15 keypress  →  toggle 3D pan mode    (axis 1: Translate XY)
+All tap counting, hold detection, mode switching, and movement routing
+is handled here in the daemon, driven by ~/.config/spacemouse/config.json.
 
-Tap mapping on the physical button:
-  1 tap   → toggle drag-scroll (handled entirely in firmware, no F-key sent)
-  2 taps  → toggle rotate mode  → F13
-  3 taps  → toggle pan mode     → F15
-  hold    → exit 3D mode (if active) → F13
+Modes
+-----
+  cursor   – normal pointer movement (default)
+  scroll   – trackball moves scroll wheel
+  rotate   – 3D orbit (RMB/MMB drag depending on app)
+  pan      – 3D pan  (MMB drag depending on app)
 
-While 3D mode is ON the firmware suppresses normal x/y cursor movement and
-sends trackball deltas as scroll events instead:
-
-  REL_HWHEEL   →  horizontal (X-axis) trackball delta
-  REL_WHEEL    →  vertical   (Y-axis) trackball delta
-
-Axes
-----
-  0  Rotate XY     – orbit / tumble the view
-  1  Translate XY  – pan the view
-  2  Zoom + Roll Z – zoom with V, horizontal-scroll / roll with H
-                     (not directly selectable via tap; kept for profile use)
+Config actions
+--------------
+  scroll_toggle  – switch between cursor and scroll
+  rotate         – enter/exit rotate mode
+  pan            – enter/exit pan mode
+  exit_3d        – exit any 3D mode back to cursor
+  nothing        – ignore
 
 Usage
 -----
-  python spacemouse_daemon.py          # run in foreground
-  systemctl --user start spacemouse   # run as service (see spacemouse.service)
+  python spacemouse_daemon.py          # foreground
+  systemctl --user start spacemouse   # as service
 """
 
 import asyncio
@@ -45,23 +42,31 @@ import subprocess
 import sys
 from pathlib import Path
 
+import evdev
+from evdev import InputDevice, UInput, ecodes as e
+
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-CONFIG_PATH = Path.home() / ".config" / "spacemouse" / "config.json"
+if sys.platform == "win32":
+    CONFIG_PATH = Path.home() / "AppData" / "Roaming" / "spacemouse" / "config.json"
+else:
+    CONFIG_PATH = Path.home() / ".config" / "spacemouse" / "config.json"
 
-_CONFIG_DEFAULTS: dict = {
+DEFAULTS: dict = {
     "actions": {
-        "double_tap": "rotate",   # axis entered by 2-tap: rotate | pan | zoom
-        "triple_tap": "pan",      # axis entered by 3-tap: rotate | pan | zoom
+        "tap_1": "scroll_toggle",
+        "tap_2": "rotate",
+        "tap_3": "pan",
+        "hold":  "exit_3d",
+    },
+    "timing": {
+        "hold_threshold_ms": 400,
+        "tap_timeout_ms":    150,
     },
     "navigation": {
-        "move_scale": 14,
+        "move_scale":         14,
         "recenter_threshold": 300,
-    },
-    "firmware": {
-        "hold_threshold_ms": 400,
-        "tap_timeout_ms": 150,
-        "scroll_divisor_3d": 10,
+        "scroll_divisor":     10,
     },
 }
 
@@ -78,13 +83,11 @@ def load_config() -> dict:
     if CONFIG_PATH.exists():
         try:
             with open(CONFIG_PATH) as f:
-                return _deep_merge(_CONFIG_DEFAULTS, json.load(f))
+                return _deep_merge(DEFAULTS, json.load(f))
         except Exception as ex:
-            logging.getLogger(__name__).warning("Could not read config: %s — using defaults", ex)
-    return _deep_merge(_CONFIG_DEFAULTS, {})
-
-import evdev
-from evdev import InputDevice, UInput, ecodes as e
+            logging.getLogger(__name__).warning(
+                "Could not read config: %s — using defaults", ex)
+    return _deep_merge(DEFAULTS, {})
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -103,30 +106,11 @@ log = logging.getLogger(__name__)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-AXIS_NAMES  = ["Rotate XY", "Translate XY", "Zoom + Roll Z"]
+KEY_F13     = e.KEY_F13   # button press/release signal from firmware
+AXIS_NAMES  = {"rotate": "Rotate XY", "pan": "Translate XY"}
 ACTION_AXIS = {"rotate": 0, "pan": 1, "zoom": 2}
 
-# evdev key codes used by the firmware tap protocol
-KEY_F13 = e.KEY_F13   # 183 – double tap
-KEY_F15 = e.KEY_F15   # 185 – triple tap
-
 # ─── Application profiles ─────────────────────────────────────────────────────
-#
-# Each profile describes how the three axes map to mouse actions in a specific
-# 3D application.
-#
-# Keys per axis:
-#   "buttons"  – list of mouse button codes to hold while moving
-#   "mods"     – list of keyboard modifier codes to hold while moving
-#   "zoom"     – if True, use scroll-wheel events instead of mouse movement
-#
-# Navigation conventions used:
-#   FreeCAD  (Gesture nav, default in FC 1.0)
-#     Orbit  = RMB drag      Pan = MMB drag      Zoom = scroll
-#   Blender  (default)
-#     Orbit  = MMB drag      Pan = Shift+MMB     Zoom = scroll
-#   Fusion 360 (via Bottles)
-#     Orbit  = Shift+MMB     Pan = MMB drag      Zoom = scroll
 
 PROFILES: dict[str, dict] = {
     "freecad": {
@@ -155,20 +139,18 @@ PROFILES: dict[str, dict] = {
     },
 }
 
-# Maps substrings of the Hyprland window class to a profile name
 WINDOW_CLASS_TO_PROFILE: dict[str, str] = {
-    "freecad":  "freecad",
+    "freecad":    "freecad",
     "org.freecad": "freecad",
-    "blender":  "blender",
-    "bottles":  "fusion",   # Fusion 360 runs inside Bottles on Linux
-    "fusion360": "fusion",
-    "fusion":   "fusion",
+    "blender":    "blender",
+    "bottles":    "fusion",
+    "fusion360":  "fusion",
+    "fusion":     "fusion",
 }
 
 # ─── Device helpers ───────────────────────────────────────────────────────────
 
 def find_ploopy_devices() -> list[InputDevice]:
-    """Return all evdev devices whose name contains 'ploopy' or 'nano'."""
     found = []
     for path in evdev.list_devices():
         try:
@@ -180,75 +162,73 @@ def find_ploopy_devices() -> list[InputDevice]:
         except PermissionError:
             log.warning(
                 "Permission denied on %s — add yourself to the 'input' group:\n"
-                "  sudo usermod -aG input $USER  (then log out and back in)",
-                path,
-            )
+                "  sudo usermod -aG input $USER  (then log out and back in)", path)
         except Exception:
             pass
     return found
 
-
 def create_virtual_device() -> UInput:
-    """Create a uinput virtual mouse + keyboard for injecting input events."""
     caps = {
-        e.EV_KEY: [
-            e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE,
-            e.KEY_LEFTSHIFT, e.KEY_LEFTCTRL,
-        ],
-        e.EV_REL: [
-            e.REL_X, e.REL_Y,
-            e.REL_WHEEL, e.REL_HWHEEL,
-        ],
+        e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE,
+                   e.KEY_LEFTSHIFT, e.KEY_LEFTCTRL],
+        e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL, e.REL_HWHEEL],
     }
     return UInput(caps, name="spacemouse-virtual", version=0x3)
-
 
 # ─── Window detection ─────────────────────────────────────────────────────────
 
 def get_active_window_class() -> str:
-    """
-    Return the Wayland window class of the focused window.
-    Uses 'hyprctl activewindow -j' (Hyprland-specific).
-    Returns an empty string if detection fails.
-    """
     try:
         result = subprocess.run(
             ["hyprctl", "activewindow", "-j"],
             capture_output=True, text=True, timeout=0.5,
         )
-        data = json.loads(result.stdout)
-        return data.get("class", "").lower()
+        return json.loads(result.stdout).get("class", "").lower()
     except Exception:
         return ""
 
-
 def get_profile(window_class: str) -> dict:
-    """Pick the best application profile for the given window class string."""
-    for key, profile_name in WINDOW_CLASS_TO_PROFILE.items():
+    for key, name in WINDOW_CLASS_TO_PROFILE.items():
         if key in window_class:
-            return PROFILES[profile_name]
+            return PROFILES[name]
     return PROFILES["default"]
-
 
 # ─── Daemon ───────────────────────────────────────────────────────────────────
 
 class SpaceMouseDaemon:
-    """
-    Reads events from one or more Ploopy evdev nodes and injects 3D-navigation
-    mouse actions via a virtual uinput device.
-    """
-
-    def __init__(self, devices: list[InputDevice], virtual: UInput, config: dict) -> None:
+    def __init__(self, devices: list[InputDevice], virtual: UInput,
+                 config: dict) -> None:
         self.devices = devices
         self.virtual = virtual
-        self.config   = config
-        self.mode_3d  = False
-        self.axis     = 0
+        self.config  = config
+
+        # Mode: "cursor" | "scroll" | "rotate" | "pan"
+        self.mode = "cursor"
+
         self._held_buttons: list[int] = []
         self._held_mods:    list[int] = []
         self._mouse_devices = [d for d in devices if e.EV_REL in d.capabilities()]
+
+        # Movement accumulators
+        self._accum_x = 0
+        self._accum_y = 0
         self._drift_x = 0
         self._drift_y = 0
+
+        # Tap counting state
+        self._tap_count      = 0
+        self._press_time: float = 0.0
+        self._tap_task: asyncio.Task | None = None
+
+    # ── Config helpers ───────────────────────────────────────────────────────
+
+    @property
+    def _hold_threshold(self) -> float:
+        return self.config["timing"]["hold_threshold_ms"] / 1000.0
+
+    @property
+    def _tap_timeout(self) -> float:
+        return self.config["timing"]["tap_timeout_ms"] / 1000.0
 
     @property
     def _move_scale(self) -> int:
@@ -258,27 +238,25 @@ class SpaceMouseDaemon:
     def _recenter_threshold(self) -> int:
         return self.config["navigation"]["recenter_threshold"]
 
-    def _axis_for(self, key: str) -> int:
-        action = self.config["actions"].get(key, "rotate")
-        return ACTION_AXIS.get(action, 0)
+    @property
+    def _scroll_divisor(self) -> int:
+        return self.config["navigation"]["scroll_divisor"]
 
-    # ── Cursor centering ─────────────────────────────────────────────────────
+    @property
+    def _axis(self) -> int:
+        return ACTION_AXIS.get(self.mode, 0)
+
+    # ── Cursor ───────────────────────────────────────────────────────────────
 
     def _center_cursor(self) -> None:
-        # Warp cursor to the centre of the focused window so orbit/pan starts
-        # far from any screen edge. Called when entering 3D mode or cycling
-        # axes — at these moments no button is held, so FreeCAD ignores the
-        # resulting wl_pointer.motion and no counter-movement is injected.
         try:
             result = subprocess.run(
                 ["hyprctl", "activewindow", "-j"],
                 capture_output=True, text=True, timeout=0.2,
             )
             data = json.loads(result.stdout)
-            at   = data.get("at",   [0, 0])
-            size = data.get("size", [1920, 1080])
-            cx   = at[0] + size[0] // 2
-            cy   = at[1] + size[1] // 2
+            at, size = data.get("at", [0, 0]), data.get("size", [1920, 1080])
+            cx, cy = at[0] + size[0] // 2, at[1] + size[1] // 2
             subprocess.run(
                 ["hyprctl", "dispatch", "movecursor", str(cx), str(cy)],
                 capture_output=True, timeout=0.1,
@@ -289,29 +267,9 @@ class SpaceMouseDaemon:
         except Exception:
             pass
 
-    # ── Grab helpers ────────────────────────────────────────────────────────
-
-    def _set_grab(self, grab: bool) -> None:
-        """Exclusively grab (or release) the mouse HID nodes.
-
-        Grab prevents raw scroll events from leaking to the focused app
-        while 3D mode is active; ungrab restores normal pass-through.
-        """
-        for dev in self._mouse_devices:
-            try:
-                if grab:
-                    dev.grab()
-                    log.info("Grabbed %s", dev.path)
-                else:
-                    dev.ungrab()
-                    log.info("Released %s", dev.path)
-            except Exception as ex:
-                log.warning("grab(%s) FAILED on %s: %s — raw scroll may leak", grab, dev.path, ex)
-
     # ── Virtual device helpers ───────────────────────────────────────────────
 
     def _release_all(self) -> None:
-        """Release any buttons / modifier keys that are currently held."""
         for btn in self._held_buttons:
             self.virtual.write(e.EV_KEY, btn, 0)
         for mod in self._held_mods:
@@ -322,14 +280,9 @@ class SpaceMouseDaemon:
         self._held_mods    = []
 
     def _hold(self, buttons: list[int], mods: list[int]) -> None:
-        """
-        Ensure the given buttons and modifiers are held.
-        If the set changed, release the old ones first.
-        """
-        if set(buttons) == set(self._held_buttons) and \
-           set(mods)    == set(self._held_mods):
-            return  # already holding the right combo – nothing to do
-
+        if (set(buttons) == set(self._held_buttons) and
+                set(mods) == set(self._held_mods)):
+            return
         self._release_all()
         for mod in mods:
             self.virtual.write(e.EV_KEY, mod, 1)
@@ -339,112 +292,185 @@ class SpaceMouseDaemon:
         self._held_buttons = list(buttons)
         self._held_mods    = list(mods)
 
-    # ── Movement translation ─────────────────────────────────────────────────
+    # ── Grab ────────────────────────────────────────────────────────────────
 
-    def _handle_movement(self, dx: int, dy: int) -> None:
-        """
-        Translate a (dx, dy) scroll-tick pair into a 3D-navigation input event
-        for the currently focused application.
+    def _grab_all(self) -> None:
+        for dev in self._mouse_devices:
+            try:
+                dev.grab()
+                log.info("Grabbed %s", dev.path)
+            except Exception as ex:
+                log.warning("grab FAILED on %s: %s", dev.path, ex)
 
-        dx  comes from REL_HWHEEL  (horizontal trackball movement)
-        dy  comes from REL_WHEEL   (vertical   trackball movement)
+    def _ungrab_all(self) -> None:
+        for dev in self._mouse_devices:
+            try:
+                dev.ungrab()
+                log.info("Released %s", dev.path)
+            except Exception:
+                pass
 
-        Axis 0 (Rotate XY) and Axis 1 (Translate XY):
-          Hold the app-specific mouse button(s) + modifier(s) and move the
-          virtual cursor.  The app interprets held-button + mouse-move as
-          orbit or pan.
+    # ── Mode switching ───────────────────────────────────────────────────────
 
-        Axis 2 (Zoom + Roll Z):
-          dy → vertical   scroll  (zoom in/out in all 3D apps)
-          dx → horizontal scroll  (roll / Z-axis rotation where supported)
-        """
-        window_class = get_active_window_class()
-        profile      = get_profile(window_class)
-        axis_cfg     = profile[self.axis]
+    def _set_mode(self, new_mode: str) -> None:
+        old_mode = self.mode
+        if old_mode == new_mode:
+            return
+        self.mode = new_mode
+        self._release_all()
+        self._accum_x = 0
+        self._accum_y = 0
+
+        if new_mode in ("rotate", "pan"):
+            self._center_cursor()
+
+        log.info("Mode: %s → %s", old_mode, new_mode)
+
+    def _apply_action(self, action: str) -> None:
+        if action == "scroll_toggle":
+            if self.mode == "scroll":
+                self._set_mode("cursor")
+            elif self.mode == "cursor":
+                self._set_mode("scroll")
+            else:
+                self._set_mode("cursor")   # exit 3D → cursor
+        elif action == "rotate":
+            self._set_mode("cursor" if self.mode == "rotate" else "rotate")
+        elif action == "pan":
+            self._set_mode("cursor" if self.mode == "pan" else "pan")
+        elif action == "exit_3d":
+            if self.mode not in ("cursor", "scroll"):
+                self._set_mode("cursor")
+        # "nothing" → no-op
+
+    # ── Tap counting ─────────────────────────────────────────────────────────
+
+    async def _on_button_press(self, ts: float) -> None:
+        if self._tap_task:
+            self._tap_task.cancel()
+            self._tap_task = None
+        self._press_time = ts
+
+    async def _on_button_release(self, ts: float) -> None:
+        duration = ts - self._press_time
+
+        if duration >= self._hold_threshold:
+            self._tap_count = 0
+            action = self.config["actions"].get("hold", "exit_3d")
+            self._apply_action(action)
+        else:
+            self._tap_count += 1
+            self._tap_task = asyncio.create_task(
+                self._tap_timer(self._tap_timeout))
+
+    async def _tap_timer(self, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        count = self._tap_count
+        self._tap_count = 0
+        self._tap_task  = None
+        key = f"tap_{min(count, 3)}"
+        action = self.config["actions"].get(key, "nothing")
+        self._apply_action(action)
+        log.info("Tap ×%d → %s", count, action)
+
+    # ── Movement routing ─────────────────────────────────────────────────────
+
+    def _handle_raw_movement(self, dx: int, dy: int) -> None:
+        if self.mode == "cursor":
+            if dx:
+                self.virtual.write(e.EV_REL, e.REL_X, dx)
+            if dy:
+                self.virtual.write(e.EV_REL, e.REL_Y, dy)
+            if dx or dy:
+                self.virtual.syn()
+
+        elif self.mode == "scroll":
+            div = self._scroll_divisor
+            self._accum_x += dx
+            self._accum_y += dy
+            h = int(self._accum_x / div) if abs(self._accum_x) >= div else 0
+            v = int(-self._accum_y / div) if abs(self._accum_y) >= div else 0
+            self._accum_x -= h * div
+            self._accum_y -= -v * div
+            if h:
+                self.virtual.write(e.EV_REL, e.REL_HWHEEL, h)
+            if v:
+                self.virtual.write(e.EV_REL, e.REL_WHEEL, v)
+            if h or v:
+                self.virtual.syn()
+
+        elif self.mode in ("rotate", "pan"):
+            div = self._scroll_divisor
+            self._accum_x += dx
+            self._accum_y += dy
+            tick_x = int(self._accum_x / div) if abs(self._accum_x) >= div else 0
+            tick_y = int(self._accum_y / div) if abs(self._accum_y) >= div else 0
+            self._accum_x -= tick_x * div
+            self._accum_y -= tick_y * div
+            if tick_x or tick_y:
+                self._handle_3d_movement(tick_x, tick_y)
+
+    def _handle_3d_movement(self, dx: int, dy: int) -> None:
+        profile  = get_profile(get_active_window_class())
+        axis_cfg = profile[self._axis]
 
         if axis_cfg.get("zoom", False):
-            # Axis 2: pass movement through as scroll events
             self._release_all()
-            if dy != 0:
-                self.virtual.write(e.EV_REL, e.REL_WHEEL,  dy)
-            if dx != 0:
+            if dy:
+                self.virtual.write(e.EV_REL, e.REL_WHEEL, dy)
+            if dx:
                 self.virtual.write(e.EV_REL, e.REL_HWHEEL, dx)
             self.virtual.syn()
         else:
-            # Axes 0 / 1: hold button combo and inject virtual mouse movement.
-            # If the cursor has drifted too far from center, release buttons,
-            # warp back to center, then re-press. FreeCAD uses the re-press
-            # position as its new reference point so orbit/pan continues
-            # smoothly without any visible jump.
             ms = self._move_scale
             self._drift_x += dx * ms
             self._drift_y += -dy * ms
-            if abs(self._drift_x) > self._recenter_threshold or \
-               abs(self._drift_y) > self._recenter_threshold:
+            if (abs(self._drift_x) > self._recenter_threshold or
+                    abs(self._drift_y) > self._recenter_threshold):
                 self._release_all()
                 self.virtual.syn()
-                self._center_cursor()  # also resets _drift_x/_drift_y
+                self._center_cursor()
             self._hold(axis_cfg["buttons"], axis_cfg["mods"])
-            if dx != 0:
+            if dx:
                 self.virtual.write(e.EV_REL, e.REL_X,  dx * ms)
-            if dy != 0:
+            if dy:
                 self.virtual.write(e.EV_REL, e.REL_Y, -dy * ms)
             self.virtual.syn()
-
-    # ── Tap intent handler ───────────────────────────────────────────────────
-
-    def _handle_tap_intent(self, target_axis: int) -> None:
-        """Enter/switch to target_axis, or exit if already on that axis."""
-        if self.mode_3d and self.axis == target_axis:
-            self.mode_3d = False
-            self._release_all()
-            self._set_grab(False)
-            log.info("3D mode OFF")
-        else:
-            entering = not self.mode_3d
-            self.mode_3d = True
-            self.axis = target_axis
-            self._release_all()
-            if entering:
-                self._set_grab(True)
-            self._center_cursor()
-            log.info("3D mode ON  (axis %d: %s)", target_axis, AXIS_NAMES[target_axis])
 
     # ── Event loop ───────────────────────────────────────────────────────────
 
     async def _read_device(self, dev: InputDevice) -> None:
-        """Read events from a single evdev device indefinitely."""
         async for event in dev.async_read_loop():
-            if event.type == e.EV_KEY and event.value == 1:  # key-down only
-                if event.code == KEY_F13:
-                    self._handle_tap_intent(self._axis_for("double_tap"))
-                elif event.code == KEY_F15:
-                    self._handle_tap_intent(self._axis_for("triple_tap"))
+            if event.type == e.EV_KEY and event.code == KEY_F13:
+                ts = event.timestamp()
+                if event.value == 1:
+                    await self._on_button_press(ts)
+                elif event.value == 0:
+                    await self._on_button_release(ts)
 
-            elif event.type == e.EV_REL and self.mode_3d:
+            elif event.type == e.EV_REL:
                 dx, dy = 0, 0
-                if event.code == e.REL_HWHEEL:
+                if event.code == e.REL_X:
                     dx = event.value
-                elif event.code == e.REL_WHEEL:
+                elif event.code == e.REL_Y:
                     dy = event.value
                 if dx or dy:
-                    self._handle_movement(dx, dy)
+                    self._handle_raw_movement(dx, dy)
 
     async def run(self) -> None:
-        log.info(
-            "Daemon running. Monitoring %d device(s).", len(self.devices)
-        )
-        # Run one reader coroutine per Ploopy device concurrently.
-        # (QMK composite USB devices expose separate HID nodes for keyboard
-        #  and mouse, so there may be two entries for one physical device.)
+        log.info("Daemon running — grabbing %d mouse device(s).", len(self._mouse_devices))
+        self._grab_all()
         tasks = [asyncio.create_task(self._read_device(d)) for d in self.devices]
         try:
             await asyncio.gather(*tasks)
         finally:
             self._release_all()
+            self._ungrab_all()
             for t in tasks:
                 t.cancel()
-
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
@@ -463,11 +489,12 @@ async def main() -> None:
         sys.exit(1)
 
     virtual = create_virtual_device()
-    device_path = virtual.device.path if virtual.device else f"fd={virtual.fd}"
-    log.info("Virtual uinput device created: %s", device_path)
+    log.info("Virtual uinput device: %s",
+             virtual.device.path if virtual.device else f"fd={virtual.fd}")
 
     config = load_config()
-    log.info("Config loaded from %s", CONFIG_PATH if CONFIG_PATH.exists() else "defaults")
+    log.info("Config: %s", CONFIG_PATH if CONFIG_PATH.exists() else "defaults")
+
     daemon = SpaceMouseDaemon(devices, virtual, config)
     try:
         await daemon.run()
@@ -476,7 +503,6 @@ async def main() -> None:
     finally:
         virtual.close()
         log.info("Daemon stopped.")
-
 
 if __name__ == "__main__":
     asyncio.run(main())

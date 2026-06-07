@@ -8,11 +8,9 @@ Edit tap actions, navigation tuning, and firmware timing values.
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
-import webbrowser
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
@@ -28,27 +26,27 @@ if sys.platform == "win32":
 else:
     CONFIG_PATH = Path.home() / ".config" / "spacemouse" / "config.json"
 
-FIRMWARE_DIR  = Path.home() / "ploopy-nano2-firmware"
-CONFIG_H_PATH = FIRMWARE_DIR / "config.h"
-
 DEFAULTS: dict = {
     "actions": {
-        "double_tap": "rotate",
-        "triple_tap": "pan",
+        "tap_1": "scroll_toggle",
+        "tap_2": "rotate",
+        "tap_3": "pan",
+        "hold":  "exit_3d",
+    },
+    "timing": {
+        "hold_threshold_ms": 400,
+        "tap_timeout_ms":    150,
     },
     "navigation": {
-        "move_scale": 14,
+        "move_scale":         14,
         "recenter_threshold": 300,
-    },
-    "firmware": {
-        "hold_threshold_ms": 400,
-        "tap_timeout_ms": 150,
-        "scroll_divisor_3d": 10,
+        "scroll_divisor":     10,
     },
 }
 
-ACTION_KEYS   = ["rotate", "pan", "zoom"]
-ACTION_LABELS = ["3D rotate (orbit)", "3D pan", "3D zoom / scroll"]
+ACTION_KEYS   = ["scroll_toggle", "rotate", "pan", "exit_3d", "nothing"]
+ACTION_LABELS = ["Toggle scroll ↔ cursor", "3D rotate (orbit)",
+                 "3D pan", "Exit 3D mode", "Nothing"]
 KEY_TO_IDX    = {k: i for i, k in enumerate(ACTION_KEYS)}
 
 
@@ -134,24 +132,43 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
         layout.setContentsMargins(16, 16, 16, 16)
 
+        def combo() -> QComboBox:
+            cb = QComboBox()
+            for lbl in ACTION_LABELS:
+                cb.addItem(lbl)
+            cb.setMinimumWidth(200)
+            return cb
+
         # ── Button Actions ────────────────────────────────────────────────────
         layout.addWidget(_section_label("Button Actions"))
         act_form = QFormLayout()
         act_form.setSpacing(8)
 
-        lbl, val = _fixed_row("1 tap", "Toggle scroll ↔ cursor  (fixed)")
-        act_form.addRow(lbl, val)
+        self.tap1_cb = combo()
+        self.tap2_cb = combo()
+        self.tap3_cb = combo()
+        self.hold_cb = combo()
 
-        self.double_tap_cb = _action_combo()
-        act_form.addRow("2 taps", self.double_tap_cb)
-
-        self.triple_tap_cb = _action_combo()
-        act_form.addRow("3+ taps", self.triple_tap_cb)
-
-        lbl, val = _fixed_row("Hold", "Exit 3D mode  (fixed)")
-        act_form.addRow(lbl, val)
+        act_form.addRow("1 tap",   self.tap1_cb)
+        act_form.addRow("2 taps",  self.tap2_cb)
+        act_form.addRow("3+ taps", self.tap3_cb)
+        act_form.addRow("Hold",    self.hold_cb)
 
         layout.addLayout(act_form)
+        layout.addWidget(_separator())
+
+        # ── Timing ───────────────────────────────────────────────────────────
+        layout.addWidget(_section_label("Timing"))
+        timing_form = QFormLayout()
+        timing_form.setSpacing(8)
+
+        self.hold_ms_sb     = _spinbox(100, 2000, "ms")
+        self.tap_timeout_sb = _spinbox(50,  1000, "ms")
+
+        timing_form.addRow("Hold threshold", self.hold_ms_sb)
+        timing_form.addRow("Tap timeout",    self.tap_timeout_sb)
+
+        layout.addLayout(timing_form)
         layout.addWidget(_separator())
 
         # ── Navigation ────────────────────────────────────────────────────────
@@ -159,36 +176,15 @@ class MainWindow(QMainWindow):
         nav_form = QFormLayout()
         nav_form.setSpacing(8)
 
-        self.move_scale_sb = _spinbox(1, 100, "px per scroll tick")
-        nav_form.addRow("Move scale", self.move_scale_sb)
+        self.move_scale_sb  = _spinbox(1,  100,  "px per scroll tick")
+        self.recenter_sb    = _spinbox(50, 2000, "px drift from center")
+        self.scroll_div_sb  = _spinbox(1,  100,  "raw counts per tick")
 
-        self.recenter_sb = _spinbox(50, 2000, "px drift from center")
-        nav_form.addRow("Recenter at", self.recenter_sb)
+        nav_form.addRow("Move scale",      self.move_scale_sb)
+        nav_form.addRow("Recenter at",     self.recenter_sb)
+        nav_form.addRow("Scroll divisor",  self.scroll_div_sb)
 
         layout.addLayout(nav_form)
-        layout.addWidget(_separator())
-
-        # ── Firmware Timing ───────────────────────────────────────────────────
-        fw_header = QHBoxLayout()
-        fw_header.addWidget(_section_label("Firmware Timing"))
-        warn = QLabel("  ⚠ requires reflash after export")
-        warn.setStyleSheet("color: #c07000;")
-        fw_header.addWidget(warn)
-        fw_header.addStretch()
-        layout.addLayout(fw_header)
-
-        fw_form = QFormLayout()
-        fw_form.setSpacing(8)
-
-        self.hold_ms_sb     = _spinbox(100, 2000, "ms")
-        self.tap_timeout_sb = _spinbox(50,  1000, "ms")
-        self.scroll_div_sb  = _spinbox(1,   100,  "raw counts per tick")
-
-        fw_form.addRow("Hold threshold",    self.hold_ms_sb)
-        fw_form.addRow("Tap timeout",       self.tap_timeout_sb)
-        fw_form.addRow("3D scroll divisor", self.scroll_div_sb)
-
-        layout.addLayout(fw_form)
         layout.addWidget(_separator())
 
         # ── Buttons ───────────────────────────────────────────────────────────
@@ -199,18 +195,10 @@ class MainWindow(QMainWindow):
         apply_btn.setDefault(True)
         apply_btn.clicked.connect(self._on_apply)
 
-        firmware_btn = QPushButton("Build firmware release")
-        firmware_btn.setToolTip(
-            "Saves timing values to config.h, commits and pushes a new git tag.\n"
-            "GitHub Actions will build the firmware — check the Releases page in a few minutes."
-        )
-        firmware_btn.clicked.connect(self._on_build_firmware)
-
         reset_btn = QPushButton("Reset to defaults")
         reset_btn.clicked.connect(self._on_reset)
 
         btn_row.addWidget(apply_btn)
-        btn_row.addWidget(firmware_btn)
         btn_row.addStretch()
         btn_row.addWidget(reset_btn)
         layout.addLayout(btn_row)
@@ -219,21 +207,27 @@ class MainWindow(QMainWindow):
 
     def _load_values(self) -> None:
         c = self.cfg
-        self.double_tap_cb.setCurrentIndex(
-            KEY_TO_IDX.get(c["actions"]["double_tap"], 0))
-        self.triple_tap_cb.setCurrentIndex(
-            KEY_TO_IDX.get(c["actions"]["triple_tap"], 1))
+        self.tap1_cb.setCurrentIndex(KEY_TO_IDX.get(c["actions"]["tap_1"], 0))
+        self.tap2_cb.setCurrentIndex(KEY_TO_IDX.get(c["actions"]["tap_2"], 1))
+        self.tap3_cb.setCurrentIndex(KEY_TO_IDX.get(c["actions"]["tap_3"], 2))
+        self.hold_cb.setCurrentIndex(KEY_TO_IDX.get(c["actions"]["hold"],  3))
+        self.hold_ms_sb.setValue(c["timing"]["hold_threshold_ms"])
+        self.tap_timeout_sb.setValue(c["timing"]["tap_timeout_ms"])
         self.move_scale_sb.setValue(c["navigation"]["move_scale"])
         self.recenter_sb.setValue(c["navigation"]["recenter_threshold"])
-        self.hold_ms_sb.setValue(c["firmware"]["hold_threshold_ms"])
-        self.tap_timeout_sb.setValue(c["firmware"]["tap_timeout_ms"])
-        self.scroll_div_sb.setValue(c["firmware"]["scroll_divisor_3d"])
+        self.scroll_div_sb.setValue(c["navigation"]["scroll_divisor"])
 
     def _collect(self) -> dict:
         return {
             "actions": {
-                "double_tap": ACTION_KEYS[self.double_tap_cb.currentIndex()],
-                "triple_tap": ACTION_KEYS[self.triple_tap_cb.currentIndex()],
+                "tap_1": ACTION_KEYS[self.tap1_cb.currentIndex()],
+                "tap_2": ACTION_KEYS[self.tap2_cb.currentIndex()],
+                "tap_3": ACTION_KEYS[self.tap3_cb.currentIndex()],
+                "hold":  ACTION_KEYS[self.hold_cb.currentIndex()],
+            },
+            "timing": {
+                "hold_threshold_ms": self.hold_ms_sb.value(),
+                "tap_timeout_ms":    self.tap_timeout_sb.value(),
             },
             "navigation": {
                 "move_scale":         self.move_scale_sb.value(),
@@ -241,8 +235,8 @@ class MainWindow(QMainWindow):
             },
             "firmware": {
                 "hold_threshold_ms":  self.hold_ms_sb.value(),
-                "tap_timeout_ms":     self.tap_timeout_sb.value(),
-                "scroll_divisor_3d":  self.scroll_div_sb.value(),
+                "recenter_threshold": self.recenter_sb.value(),
+                "scroll_divisor":     self.scroll_div_sb.value(),
             },
         }
 
@@ -267,86 +261,6 @@ class MainWindow(QMainWindow):
         except Exception as ex:
             QMessageBox.critical(self, "Error",
                                  f"Daemon restart failed:\n{ex}")
-
-    def _on_build_firmware(self) -> None:
-        cfg = self._collect()
-        save_config(cfg)
-        self.cfg = cfg
-
-        if not CONFIG_H_PATH.exists():
-            QMessageBox.critical(
-                self, "Not found",
-                f"config.h not found at:\n{CONFIG_H_PATH}\n\n"
-                "Is the firmware repo at ~/ploopy-nano2-firmware?",
-            )
-            return
-
-        # Patch config.h with new timing values
-        text = CONFIG_H_PATH.read_text()
-        fw   = cfg["firmware"]
-        text = re.sub(r"(#define HOLD_THRESHOLD\s+)\d+",
-                      rf"\g<1>{fw['hold_threshold_ms']}", text)
-        text = re.sub(r"(#define TAP_TIMEOUT\s+)\d+",
-                      rf"\g<1>{fw['tap_timeout_ms']}", text)
-        text = re.sub(r"(#define SCROLL_DIVISOR_3D\s+)\d+",
-                      rf"\g<1>{fw['scroll_divisor_3d']}", text)
-        CONFIG_H_PATH.write_text(text)
-
-        # Check if config.h actually changed
-        diff = subprocess.run(
-            ["git", "diff", "--quiet", "config.h"],
-            cwd=FIRMWARE_DIR,
-        )
-        if diff.returncode == 0:
-            QMessageBox.information(self, "No changes",
-                                    "Firmware timing values are unchanged — no build needed.")
-            return
-
-        # Auto-increment the version tag
-        res = subprocess.run(
-            ["git", "describe", "--tags", "--abbrev=0"],
-            cwd=FIRMWARE_DIR, capture_output=True, text=True,
-        )
-        latest = res.stdout.strip()
-        if latest.startswith("v"):
-            parts = latest[1:].split(".")
-            parts[-1] = str(int(parts[-1]) + 1)
-            new_tag = "v" + ".".join(parts)
-        else:
-            new_tag = "v1.0.0"
-
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            subprocess.run(["git", "add", "config.h"],
-                           cwd=FIRMWARE_DIR, check=True)
-            subprocess.run(
-                ["git", "commit", "-m", f"Update firmware timing ({new_tag})"],
-                cwd=FIRMWARE_DIR, check=True,
-            )
-            subprocess.run(["git", "push", "origin", "master"],
-                           cwd=FIRMWARE_DIR, check=True)
-            subprocess.run(["git", "tag", new_tag],
-                           cwd=FIRMWARE_DIR, check=True)
-            subprocess.run(["git", "push", "origin", new_tag],
-                           cwd=FIRMWARE_DIR, check=True)
-        except subprocess.CalledProcessError as ex:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "Git error",
-                                 f"Failed to push release:\n{ex}")
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-
-        webbrowser.open(
-            "https://github.com/hakonamatata177/ploopy-nano2-firmware/releases"
-        )
-        QMessageBox.information(
-            self, "Building firmware",
-            f"Tagged {new_tag} and pushed to GitHub.\n\n"
-            "The firmware is building now (takes ~2 min).\n"
-            "Download firmware.uf2 from the Releases page,\n"
-            "then flash it by holding the Ploopy button while plugging in.",
-        )
 
     def _on_reset(self) -> None:
         reply = QMessageBox.question(
