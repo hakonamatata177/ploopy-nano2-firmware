@@ -334,30 +334,38 @@ class SpaceMouseDaemon:
         async for event in dev.async_read_loop():
             if event.type == e.EV_KEY and event.value == 1:  # key-down only
                 if event.code == KEY_F13:
-                    # Double tap: toggle 3D rotation mode (axis 0)
-                    if self.mode_3d:
+                    # Double tap: rotate intent
+                    # already rotating → exit; panning or off → enter/switch to rotate
+                    if self.mode_3d and self.axis == 0:
                         self.mode_3d = False
                         self._release_all()
                         self._set_grab(False)
                         log.info("3D mode OFF")
                     else:
+                        entering = not self.mode_3d
                         self.mode_3d = True
                         self.axis = 0
-                        self._set_grab(True)
+                        self._release_all()
+                        if entering:
+                            self._set_grab(True)
                         self._center_cursor()
                         log.info("3D mode ON  (axis 0: %s)", AXIS_NAMES[0])
 
                 elif event.code == KEY_F15:
-                    # Triple tap: toggle 3D pan mode (axis 1)
-                    if self.mode_3d:
+                    # Triple tap: pan intent
+                    # already panning → exit; rotating or off → enter/switch to pan
+                    if self.mode_3d and self.axis == 1:
                         self.mode_3d = False
                         self._release_all()
                         self._set_grab(False)
                         log.info("3D mode OFF")
                     else:
+                        entering = not self.mode_3d
                         self.mode_3d = True
                         self.axis = 1
-                        self._set_grab(True)
+                        self._release_all()
+                        if entering:
+                            self._set_grab(True)
                         self._center_cursor()
                         log.info("3D mode ON  (axis 1: %s)", AXIS_NAMES[1])
 

@@ -14,6 +14,7 @@ static uint16_t tap_timer       = 0;  // time of last tap release
 static uint8_t  tap_count       = 0;  // taps accumulated in current multi-tap sequence
 static bool     btn_held        = false;
 static bool     mode_3d         = false; // true while 3D mode is active (suppresses cursor)
+static uint8_t  axis_3d         = 0;     // 0 = rotate, 1 = pan
 
 // How many raw trackball counts to accumulate before emitting one scroll tick.
 // Higher = slower / less sensitive 3D movement. Tune to taste.
@@ -30,14 +31,16 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 // Multi-tap detection: taps are counted on release; once TAP_TIMEOUT ms passes
 // without another tap the accumulated count is acted on.
 //
-//   1 tap  → toggle scroll vs pointer mode (drag-scroll)
-//   2 taps → toggle 3D rotation mode;  sends F13 to the Python daemon
-//   3 taps → toggle 3D pan mode;       sends F15 to the Python daemon
-//   hold   → exit 3D mode if active;   sends F13 to the Python daemon
+//   1 tap        → toggle scroll / pointer mode (only outside 3D mode)
+//   2 taps       → if not in 3D or in pan: enter/switch to rotate (F13)
+//                  if already in rotate: exit 3D (F13)
+//   3+ taps      → if not in 3D or in rotate: enter/switch to pan (F15)
+//                  if already in pan: exit 3D (F15)
+//   hold         → exit 3D mode (sends F13 or F15 matching current axis)
 //
 // Daemon protocol:
-//   F13 = rotate-mode toggle (axis 0, Rotate XY)
-//   F15 = pan-mode toggle    (axis 1, Translate XY)
+//   F13 = "rotate intent" — enter rotate if off/pan, exit if already rotating
+//   F15 = "pan intent"    — enter pan if off/rotate, exit if already panning
 bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     if (keycode == BTN_CUSTOM) {
         if (record->event.pressed) {
@@ -46,14 +49,13 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
         } else {
             btn_held = false;
             if (timer_elapsed(btn_press_timer) < HOLD_THRESHOLD) {
-                // Short tap: accumulate and wait for more taps
                 tap_count++;
                 tap_timer = timer_read();
             } else {
-                // Hold: exit 3D mode if active
+                // Hold: exit 3D mode
                 if (mode_3d) {
                     mode_3d = false;
-                    tap_code(KC_F13);
+                    tap_code(axis_3d == 0 ? KC_F13 : KC_F15);
                 }
                 tap_count = 0;
             }
@@ -64,22 +66,38 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
 }
 
 // ─── Multi-tap dispatch ───────────────────────────────────────────────────────
-//
-// Called every QMK scan cycle. Once TAP_TIMEOUT ms has passed since the last
-// tap release we know the sequence is complete and can act on tap_count.
 void matrix_scan_user(void) {
     if (tap_count > 0 && !btn_held && timer_elapsed(tap_timer) > TAP_TIMEOUT) {
         switch (tap_count) {
             case 1:
-                toggle_drag_scroll();
+                // Only toggle scroll when not in 3D mode to avoid accidents
+                if (!mode_3d) toggle_drag_scroll();
                 break;
             case 2:
-                mode_3d = !mode_3d;
-                tap_code(KC_F13); // daemon: toggle rotate mode
+                if (!mode_3d) {
+                    // Off → enter rotate
+                    mode_3d = true; axis_3d = 0;
+                } else if (axis_3d == 0) {
+                    // Already rotating → exit
+                    mode_3d = false;
+                } else {
+                    // Panning → switch to rotate (stay in 3D)
+                    axis_3d = 0;
+                }
+                tap_code(KC_F13);
                 break;
-            default: // 3 or more taps
-                mode_3d = !mode_3d;
-                tap_code(KC_F15); // daemon: toggle pan mode
+            default: // 3+ taps
+                if (!mode_3d) {
+                    // Off → enter pan
+                    mode_3d = true; axis_3d = 1;
+                } else if (axis_3d == 1) {
+                    // Already panning → exit
+                    mode_3d = false;
+                } else {
+                    // Rotating → switch to pan (stay in 3D)
+                    axis_3d = 1;
+                }
+                tap_code(KC_F15);
                 break;
         }
         tap_count = 0;
