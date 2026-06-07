@@ -9,9 +9,11 @@ enum custom_keycodes {
 };
 
 // ─── State variables ──────────────────────────────────────────────────────────
-static uint16_t btn_timer = 0;   // records when the button went down
-static bool     mode_3d   = false; // true while 3D mode is active
-static uint8_t  axis_3d   = 0;    // 0 = Rotate XY, 1 = Translate XY, 2 = Zoom/Roll Z
+static uint16_t btn_press_timer = 0;  // when the button went down
+static uint16_t tap_timer       = 0;  // time of last tap release
+static uint8_t  tap_count       = 0;  // taps accumulated in current multi-tap sequence
+static bool     btn_held        = false;
+static bool     mode_3d         = false; // true while 3D mode is active (suppresses cursor)
 
 // How many raw trackball counts to accumulate before emitting one scroll tick.
 // Higher = slower / less sensitive 3D movement. Tune to taste.
@@ -25,49 +27,63 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 
 // ─── Button tap / hold logic ──────────────────────────────────────────────────
 //
-// Outside 3D mode:
-//   tap  (<400 ms) → toggle scroll vs pointer mode  (unchanged from original)
-//   hold (≥400 ms) → enter 3D mode; send F13 to signal the Python daemon
+// Multi-tap detection: taps are counted on release; once TAP_TIMEOUT ms passes
+// without another tap the accumulated count is acted on.
 //
-// Inside 3D mode:
-//   tap  (<400 ms) → cycle active axis 0→1→2→0; send F14 to signal the daemon
-//   hold (≥400 ms) → exit  3D mode; send F13 to signal the daemon
+//   1 tap  → toggle scroll vs pointer mode (drag-scroll)
+//   2 taps → toggle 3D rotation mode;  sends F13 to the Python daemon
+//   3 taps → toggle 3D pan mode;       sends F15 to the Python daemon
+//   hold   → exit 3D mode if active;   sends F13 to the Python daemon
 //
-// The Python daemon listens for F13 (mode toggle) and F14 (axis cycle).
-// F13/F14 are virtually unused by FreeCAD / Blender / Fusion so they don't
-// accidentally trigger anything in those apps.
+// Daemon protocol:
+//   F13 = rotate-mode toggle (axis 0, Rotate XY)
+//   F15 = pan-mode toggle    (axis 1, Translate XY)
 bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     if (keycode == BTN_CUSTOM) {
         if (record->event.pressed) {
-            btn_timer = timer_read();
+            btn_press_timer = timer_read();
+            btn_held = true;
         } else {
-            bool short_tap = timer_elapsed(btn_timer) < HOLD_THRESHOLD;
-
-            if (mode_3d) {
-                if (short_tap) {
-                    // Cycle axis and tell the daemon which axis is now active
-                    axis_3d = (axis_3d + 1) % 3;
-                    tap_code(KC_F14);
-                } else {
-                    // Exit 3D mode
+            btn_held = false;
+            if (timer_elapsed(btn_press_timer) < HOLD_THRESHOLD) {
+                // Short tap: accumulate and wait for more taps
+                tap_count++;
+                tap_timer = timer_read();
+            } else {
+                // Hold: exit 3D mode if active
+                if (mode_3d) {
                     mode_3d = false;
                     tap_code(KC_F13);
                 }
-            } else {
-                if (short_tap) {
-                    // Normal: toggle drag-scroll on/off
-                    toggle_drag_scroll();
-                } else {
-                    // Enter 3D mode, reset to axis 0
-                    mode_3d = true;
-                    axis_3d = 0;
-                    tap_code(KC_F13);
-                }
+                tap_count = 0;
             }
         }
-        return false; // tell QMK we handled this key
+        return false;
     }
     return true;
+}
+
+// ─── Multi-tap dispatch ───────────────────────────────────────────────────────
+//
+// Called every QMK scan cycle. Once TAP_TIMEOUT ms has passed since the last
+// tap release we know the sequence is complete and can act on tap_count.
+void matrix_scan_user(void) {
+    if (tap_count > 0 && !btn_held && timer_elapsed(tap_timer) > TAP_TIMEOUT) {
+        switch (tap_count) {
+            case 1:
+                toggle_drag_scroll();
+                break;
+            case 2:
+                mode_3d = !mode_3d;
+                tap_code(KC_F13); // daemon: toggle rotate mode
+                break;
+            default: // 3 or more taps
+                mode_3d = !mode_3d;
+                tap_code(KC_F15); // daemon: toggle pan mode
+                break;
+        }
+        tap_count = 0;
+    }
 }
 
 // ─── Trackball interception ───────────────────────────────────────────────────

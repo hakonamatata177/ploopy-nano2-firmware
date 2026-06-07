@@ -1,0 +1,166 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Build QMK firmware (.uf2) ──────────────────────────────────────────────
+  build-firmware:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-arm-none-eabi
+
+      - name: Install QMK CLI
+        run: pip install qmk
+
+      - name: Clone QMK firmware
+        run: |
+          git clone --depth 1 https://github.com/qmk/qmk_firmware.git $HOME/qmk_firmware
+          cd $HOME/qmk_firmware
+          git submodule update --init --depth 1 \
+            lib/chibios lib/chibios-contrib lib/pico-sdk \
+            lib/printf lib/fnv lib/lufa
+
+      - name: Copy keymap
+        run: |
+          mkdir -p $HOME/qmk_firmware/keyboards/ploopyco/nano_2/keymaps/custom
+          cp config.h keymap.c $HOME/qmk_firmware/keyboards/ploopyco/nano_2/keymaps/custom/
+
+      - name: Build
+        run: |
+          qmk config user.qmk_home=$HOME/qmk_firmware
+          qmk compile -kb ploopyco/nano_2/rev2_003 -km custom
+          cp $HOME/qmk_firmware/ploopyco_nano_2_rev2_003_custom.uf2 firmware.uf2
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: firmware.uf2
+
+  # ── Build daemon AppImage ──────────────────────────────────────────────────
+  build-appimage:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libfuse2
+
+      - name: Install Python deps
+        run: pip install pyinstaller -r requirements.txt
+
+      - name: Bundle with PyInstaller
+        run: |
+          pyinstaller --onefile \
+            --name spacemouse-daemon \
+            --collect-all evdev \
+            spacemouse_daemon.py
+
+      - name: Assemble AppDir
+        run: |
+          mkdir -p AppDir/usr/bin
+          cp dist/spacemouse-daemon AppDir/usr/bin/
+
+          printf '#!/bin/sh\nexec "$(dirname "$0")/usr/bin/spacemouse-daemon" "$@"\n' \
+            > AppDir/AppRun
+          chmod +x AppDir/AppRun
+
+          cat > AppDir/spacemouse-daemon.desktop << 'DESKTOP'
+          [Desktop Entry]
+          Name=Spacemouse Daemon
+          Exec=spacemouse-daemon
+          Icon=spacemouse-daemon
+          Type=Application
+          Categories=Utility;
+          DESKTOP
+
+          # Minimal 64×64 blue PNG icon (no extra deps)
+          python3 - << 'PYEOF'
+          import struct, zlib
+
+          def chunk(tag, data):
+              crc = zlib.crc32(tag + data) & 0xffffffff
+              return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', crc)
+
+          w, h, r, g, b = 64, 64, 0, 120, 215
+          raw = b''.join(b'\x00' + bytes([r, g, b] * w) for _ in range(h))
+          png = (b'\x89PNG\r\n\x1a\n'
+                 + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+                 + chunk(b'IDAT', zlib.compress(raw))
+                 + chunk(b'IEND', b''))
+          open('AppDir/spacemouse-daemon.png', 'wb').write(png)
+          PYEOF
+
+      - name: Download appimagetool
+        run: |
+          wget -q -O appimagetool \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+
+      - name: Build AppImage
+        run: ARCH=x86_64 ./appimagetool AppDir/ spacemouse-daemon-x86_64.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: spacemouse-daemon-x86_64.AppImage
+
+  # ── Create GitHub release ──────────────────────────────────────────────────
+  release:
+    needs: [build-firmware, build-appimage]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: appimage
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cat > notes.md << 'NOTES'
+          ## Ploopy Nano 2 SpaceMouse
+
+          ### Downloads
+          | File | Purpose |
+          |------|---------|
+          | `firmware.uf2` | Flash to Ploopy Nano 2 via USB bootloader |
+          | `spacemouse-daemon-x86_64.AppImage` | Linux x86-64 navigation daemon |
+
+          ### Run the daemon
+          ```bash
+          chmod +x spacemouse-daemon-x86_64.AppImage
+          ./spacemouse-daemon-x86_64.AppImage
+          ```
+
+          ### Button mapping
+          | Tap | Action |
+          |-----|--------|
+          | 1 tap | Toggle scroll / pointer mode |
+          | 2 taps | Toggle 3D rotate mode (orbit) |
+          | 3 taps | Toggle 3D pan mode |
+          | Hold | Exit 3D mode |
+          NOTES
+
+          gh release create "${{ github.ref_name }}" \
+            --title "Release ${{ github.ref_name }}" \
+            --notes-file notes.md \
+            firmware.uf2 \
+            spacemouse-daemon-x86_64.AppImage
