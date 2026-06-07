@@ -40,6 +40,7 @@ DEFAULTS: dict = {
     },
     "navigation": {
         "move_scale":         14,
+        "spnav_scale":        150,
         "recenter_threshold": 300,
         "scroll_divisor":     10,
     },
@@ -177,11 +178,13 @@ class MainWindow(QMainWindow):
         nav_form = QFormLayout()
         nav_form.setSpacing(8)
 
-        self.move_scale_sb  = _spinbox(1,  100,  "px per scroll tick")
+        self.move_scale_sb  = _spinbox(1,   100,  "px per scroll tick  (cursor-drag fallback)")
+        self.spnav_scale_sb = _spinbox(10, 1000, "units per tick  (spnav / spacemouse)")
         self.recenter_sb    = _spinbox(50, 2000, "px drift from center")
         self.scroll_div_sb  = _spinbox(1,  100,  "raw counts per tick")
 
         nav_form.addRow("Move scale",      self.move_scale_sb)
+        nav_form.addRow("SpNav scale",     self.spnav_scale_sb)
         nav_form.addRow("Recenter at",     self.recenter_sb)
         nav_form.addRow("Scroll divisor",  self.scroll_div_sb)
 
@@ -223,6 +226,7 @@ class MainWindow(QMainWindow):
         self.hold_ms_sb.setValue(c["timing"]["hold_threshold_ms"])
         self.tap_timeout_sb.setValue(c["timing"]["tap_timeout_ms"])
         self.move_scale_sb.setValue(c["navigation"]["move_scale"])
+        self.spnav_scale_sb.setValue(c["navigation"]["spnav_scale"])
         self.recenter_sb.setValue(c["navigation"]["recenter_threshold"])
         self.scroll_div_sb.setValue(c["navigation"]["scroll_divisor"])
 
@@ -240,10 +244,7 @@ class MainWindow(QMainWindow):
             },
             "navigation": {
                 "move_scale":         self.move_scale_sb.value(),
-                "recenter_threshold": self.recenter_sb.value(),
-            },
-            "firmware": {
-                "hold_threshold_ms":  self.hold_ms_sb.value(),
+                "spnav_scale":        self.spnav_scale_sb.value(),
                 "recenter_threshold": self.recenter_sb.value(),
                 "scroll_divisor":     self.scroll_div_sb.value(),
             },

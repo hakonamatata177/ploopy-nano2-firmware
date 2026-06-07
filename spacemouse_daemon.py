@@ -77,6 +77,7 @@ DEFAULTS: dict = {
     },
     "navigation": {
         "move_scale":         14,
+        "spnav_scale":        150,
         "recenter_threshold": 300,
         "scroll_divisor":     10,
     },
@@ -337,6 +338,10 @@ class SpaceMouseDaemon:
         return self.config["navigation"]["move_scale"]
 
     @property
+    def _spnav_scale(self) -> int:
+        return self.config["navigation"]["spnav_scale"]
+
+    @property
     def _recenter_threshold(self) -> int:
         return self.config["navigation"]["recenter_threshold"]
 
@@ -554,13 +559,12 @@ class SpaceMouseDaemon:
         # Send 6DOF events directly to the app via the spacemouse socket.
         # No cursor movement, no screen-edge problem, no warping.
         if self.spnav._clients:
-            self._release_all()   # make sure no stale button holds
+            self._release_all()
+            s = self._spnav_scale
             if self.mode == "rotate":
-                # dx → yaw (ry), dy → pitch (rx)
-                self.spnav.send_motion(rx=-dy * scale, ry=dx * scale)
+                self.spnav.send_motion(rx=-dy * s, ry=dx * s)
             elif self.mode == "pan":
-                # dx → tx, dy → ty (invert y for natural feel)
-                self.spnav.send_motion(x=dx * scale, y=-dy * scale)
+                self.spnav.send_motion(x=dx * s, y=-dy * s)
             return
 
         # ── cursor-drag fallback (no spnav client connected) ─────────────────
