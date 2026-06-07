@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
@@ -195,10 +196,18 @@ class MainWindow(QMainWindow):
         apply_btn.setDefault(True)
         apply_btn.clicked.connect(self._on_apply)
 
+        firmware_btn = QPushButton("Build firmware release")
+        firmware_btn.setToolTip(
+            "Tags the current firmware and pushes to GitHub.\n"
+            "CI builds firmware.uf2 — check Releases in ~2 min."
+        )
+        firmware_btn.clicked.connect(self._on_build_firmware)
+
         reset_btn = QPushButton("Reset to defaults")
         reset_btn.clicked.connect(self._on_reset)
 
         btn_row.addWidget(apply_btn)
+        btn_row.addWidget(firmware_btn)
         btn_row.addStretch()
         btn_row.addWidget(reset_btn)
         layout.addLayout(btn_row)
@@ -261,6 +270,71 @@ class MainWindow(QMainWindow):
         except Exception as ex:
             QMessageBox.critical(self, "Error",
                                  f"Daemon restart failed:\n{ex}")
+
+    def _on_build_firmware(self) -> None:
+        FIRMWARE_DIR = Path.home() / "ploopy-nano2-firmware"
+        if not FIRMWARE_DIR.exists():
+            QMessageBox.critical(self, "Not found",
+                                 f"Firmware repo not found at:\n{FIRMWARE_DIR}")
+            return
+
+        # Auto-increment version tag
+        res = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0"],
+            cwd=FIRMWARE_DIR, capture_output=True, text=True,
+        )
+        latest = res.stdout.strip()
+        if latest.startswith("v"):
+            parts = latest[1:].split(".")
+            parts[-1] = str(int(parts[-1]) + 1)
+            new_tag = "v" + ".".join(parts)
+        else:
+            new_tag = "v1.0.0"
+
+        reply = QMessageBox.question(
+            self, "Build firmware release",
+            f"Tag and push {new_tag} to trigger a firmware build on GitHub?\n\n"
+            "The new firmware.uf2 will appear in Releases in ~2 minutes.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            # Commit any uncommitted changes first (e.g. keymap tweaks)
+            dirty = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=FIRMWARE_DIR, capture_output=True, text=True,
+            ).stdout.strip()
+            if dirty:
+                subprocess.run(["git", "add", "-A"], cwd=FIRMWARE_DIR, check=True)
+                subprocess.run(
+                    ["git", "commit", "-m", f"Firmware update for {new_tag}"],
+                    cwd=FIRMWARE_DIR, check=True,
+                )
+                subprocess.run(["git", "push", "origin", "master"],
+                               cwd=FIRMWARE_DIR, check=True)
+
+            subprocess.run(["git", "tag", new_tag], cwd=FIRMWARE_DIR, check=True)
+            subprocess.run(["git", "push", "origin", new_tag],
+                           cwd=FIRMWARE_DIR, check=True)
+        except subprocess.CalledProcessError as ex:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Git error", f"Failed:\n{ex}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        webbrowser.open(
+            "https://github.com/hakonamatata177/ploopy-nano2-firmware/releases"
+        )
+        QMessageBox.information(
+            self, "Building",
+            f"Tagged {new_tag} — firmware is building now.\n\n"
+            "Download firmware.uf2 from the Releases page in ~2 minutes,\n"
+            "then flash by holding the button while plugging in your Ploopy.",
+        )
 
     def _on_reset(self) -> None:
         reply = QMessageBox.question(
