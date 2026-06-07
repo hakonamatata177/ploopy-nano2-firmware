@@ -56,10 +56,12 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y libfuse2
+          sudo apt-get install -y libfuse2 python3-dev linux-libc-dev
 
       - name: Install Python deps
-        run: pip install pyinstaller -r requirements.txt
+        run: |
+          pip install pyinstaller
+          pip install --no-build-isolation evdev
 
       - name: Bundle with PyInstaller
         run: |
