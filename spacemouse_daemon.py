@@ -71,6 +71,11 @@ AXIS_NAMES = ["Rotate XY", "Translate XY", "Zoom + Roll Z"]
 # Increase if 3D navigation feels sluggish; decrease if it jumps too fast.
 MOVE_SCALE = 14
 
+# How far (px) the cursor may drift from center before we recenter.
+# At MOVE_SCALE=14 this is ~21 scroll ticks — several seconds of movement in
+# one direction — so the brief release/warp/repress happens rarely.
+RECENTER_THRESHOLD = 300
+
 # evdev key codes used by the firmware tap protocol
 KEY_F13 = e.KEY_F13   # 183 – double tap: toggle rotate mode (axis 0)
 KEY_F15 = e.KEY_F15   # 185 – triple tap: toggle pan mode    (axis 1)
@@ -211,6 +216,8 @@ class SpaceMouseDaemon:
         self._held_buttons: list[int] = []
         self._held_mods:    list[int] = []
         self._mouse_devices = [d for d in devices if e.EV_REL in d.capabilities()]
+        self._drift_x = 0
+        self._drift_y = 0
 
     # ── Cursor centering ─────────────────────────────────────────────────────
 
@@ -233,6 +240,8 @@ class SpaceMouseDaemon:
                 ["hyprctl", "dispatch", "movecursor", str(cx), str(cy)],
                 capture_output=True, timeout=0.1,
             )
+            self._drift_x = 0
+            self._drift_y = 0
             log.debug("Cursor centred at (%d, %d)", cx, cy)
         except Exception:
             pass
@@ -320,6 +329,17 @@ class SpaceMouseDaemon:
             self.virtual.syn()
         else:
             # Axes 0 / 1: hold button combo and inject virtual mouse movement.
+            # If the cursor has drifted too far from center, release buttons,
+            # warp back to center, then re-press. FreeCAD uses the re-press
+            # position as its new reference point so orbit/pan continues
+            # smoothly without any visible jump.
+            self._drift_x += dx * MOVE_SCALE
+            self._drift_y += -dy * MOVE_SCALE
+            if abs(self._drift_x) > RECENTER_THRESHOLD or \
+               abs(self._drift_y) > RECENTER_THRESHOLD:
+                self._release_all()
+                self.virtual.syn()
+                self._center_cursor()  # also resets _drift_x/_drift_y
             self._hold(axis_cfg["buttons"], axis_cfg["mods"])
             if dx != 0:
                 self.virtual.write(e.EV_REL, e.REL_X,  dx * MOVE_SCALE)
