@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
@@ -198,14 +199,18 @@ class MainWindow(QMainWindow):
         apply_btn.setDefault(True)
         apply_btn.clicked.connect(self._on_apply)
 
-        export_btn = QPushButton("Export firmware config.h")
-        export_btn.clicked.connect(self._on_export_firmware)
+        firmware_btn = QPushButton("Build firmware release")
+        firmware_btn.setToolTip(
+            "Saves timing values to config.h, commits and pushes a new git tag.\n"
+            "GitHub Actions will build the firmware — check the Releases page in a few minutes."
+        )
+        firmware_btn.clicked.connect(self._on_build_firmware)
 
         reset_btn = QPushButton("Reset to defaults")
         reset_btn.clicked.connect(self._on_reset)
 
         btn_row.addWidget(apply_btn)
-        btn_row.addWidget(export_btn)
+        btn_row.addWidget(firmware_btn)
         btn_row.addStretch()
         btn_row.addWidget(reset_btn)
         layout.addLayout(btn_row)
@@ -263,7 +268,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error",
                                  f"Daemon restart failed:\n{ex}")
 
-    def _on_export_firmware(self) -> None:
+    def _on_build_firmware(self) -> None:
         cfg = self._collect()
         save_config(cfg)
         self.cfg = cfg
@@ -276,6 +281,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Patch config.h with new timing values
         text = CONFIG_H_PATH.read_text()
         fw   = cfg["firmware"]
         text = re.sub(r"(#define HOLD_THRESHOLD\s+)\d+",
@@ -286,14 +292,60 @@ class MainWindow(QMainWindow):
                       rf"\g<1>{fw['scroll_divisor_3d']}", text)
         CONFIG_H_PATH.write_text(text)
 
+        # Check if config.h actually changed
+        diff = subprocess.run(
+            ["git", "diff", "--quiet", "config.h"],
+            cwd=FIRMWARE_DIR,
+        )
+        if diff.returncode == 0:
+            QMessageBox.information(self, "No changes",
+                                    "Firmware timing values are unchanged — no build needed.")
+            return
+
+        # Auto-increment the version tag
+        res = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0"],
+            cwd=FIRMWARE_DIR, capture_output=True, text=True,
+        )
+        latest = res.stdout.strip()
+        if latest.startswith("v"):
+            parts = latest[1:].split(".")
+            parts[-1] = str(int(parts[-1]) + 1)
+            new_tag = "v" + ".".join(parts)
+        else:
+            new_tag = "v1.0.0"
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            subprocess.run(["git", "add", "config.h"],
+                           cwd=FIRMWARE_DIR, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", f"Update firmware timing ({new_tag})"],
+                cwd=FIRMWARE_DIR, check=True,
+            )
+            subprocess.run(["git", "push", "origin", "master"],
+                           cwd=FIRMWARE_DIR, check=True)
+            subprocess.run(["git", "tag", new_tag],
+                           cwd=FIRMWARE_DIR, check=True)
+            subprocess.run(["git", "push", "origin", new_tag],
+                           cwd=FIRMWARE_DIR, check=True)
+        except subprocess.CalledProcessError as ex:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Git error",
+                                 f"Failed to push release:\n{ex}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        webbrowser.open(
+            "https://github.com/hakonamatata177/ploopy-nano2-firmware/releases"
+        )
         QMessageBox.information(
-            self, "Exported",
-            f"config.h updated at:\n{CONFIG_H_PATH}\n\n"
-            "To apply the new timing:\n"
-            "  1. Commit & push, then tag a new release\n"
-            "  2. Download firmware.uf2 from the release\n"
-            "  3. Hold button while plugging in Ploopy\n"
-            "  4. Copy firmware.uf2 to the drive that appears",
+            self, "Building firmware",
+            f"Tagged {new_tag} and pushed to GitHub.\n\n"
+            "The firmware is building now (takes ~2 min).\n"
+            "Download firmware.uf2 from the Releases page,\n"
+            "then flash it by holding the Ploopy button while plugging in.",
         )
 
     def _on_reset(self) -> None:
