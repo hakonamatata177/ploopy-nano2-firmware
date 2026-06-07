@@ -190,9 +190,29 @@ jobs:
           name: config-appimage
           path: spacemouse-config-x86_64.AppImage
 
+  # ── Build config GUI Windows .exe ─────────────────────────────────────────
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python deps
+        run: pip install pyinstaller PyQt6
+
+      - name: Build exe
+        run: |
+          pyinstaller --onefile --name spacemouse-config --windowed `
+            --collect-all PyQt6 `
+            spacemouse_config_gui.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/spacemouse-config.exe
+
   # ── Create GitHub release ──────────────────────────────────────────────────
   release:
-    needs: [build-firmware, build-daemon-appimage, build-config-appimage]
+    needs: [build-firmware, build-daemon-appimage, build-config-appimage, build-windows-exe]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v4
@@ -207,6 +227,10 @@ jobs:
         with:
           name: config-appimage
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-exe
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -220,7 +244,8 @@ jobs:
           |------|---------|
           | `firmware.uf2` | Flash to Ploopy Nano 2 via USB bootloader |
           | `spacemouse-daemon-x86_64.AppImage` | Background daemon (run as systemd service) |
-          | `spacemouse-config-x86_64.AppImage` | GUI to configure tap actions and tuning |
+          | `spacemouse-config-x86_64.AppImage` | GUI to configure tap actions and tuning (Linux) |
+          | `spacemouse-config.exe` | GUI to configure tap actions and tuning (Windows) |
 
           ### Quick install
           ```bash
@@ -261,4 +286,5 @@ jobs:
             --notes-file notes.md \
             firmware.uf2 \
             spacemouse-daemon-x86_64.AppImage \
-            spacemouse-config-x86_64.AppImage
+            spacemouse-config-x86_64.AppImage \
+            spacemouse-config.exe

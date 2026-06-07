@@ -22,7 +22,11 @@ from PyQt6.QtWidgets import (
     QSpinBox, QVBoxLayout, QWidget,
 )
 
-CONFIG_PATH   = Path.home() / ".config" / "spacemouse" / "config.json"
+if sys.platform == "win32":
+    CONFIG_PATH = Path.home() / "AppData" / "Roaming" / "spacemouse" / "config.json"
+else:
+    CONFIG_PATH = Path.home() / ".config" / "spacemouse" / "config.json"
+
 FIRMWARE_DIR  = Path.home() / "ploopy-nano2-firmware"
 CONFIG_H_PATH = FIRMWARE_DIR / "config.h"
 
@@ -243,6 +247,11 @@ class MainWindow(QMainWindow):
         cfg = self._collect()
         save_config(cfg)
         self.cfg = cfg
+        if sys.platform == "win32":
+            QMessageBox.information(self, "Saved",
+                                    "Config saved.\n\n"
+                                    "The daemon runs on Linux only — restart it there to apply.")
+            return
         try:
             subprocess.run(
                 ["systemctl", "--user", "restart", "spacemouse"],
