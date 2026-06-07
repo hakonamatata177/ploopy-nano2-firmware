@@ -70,8 +70,13 @@ void matrix_scan_user(void) {
     if (tap_count > 0 && !btn_held && timer_elapsed(tap_timer) > TAP_TIMEOUT) {
         switch (tap_count) {
             case 1:
-                // Only toggle scroll when not in 3D mode to avoid accidents
-                if (!mode_3d) toggle_drag_scroll();
+                if (mode_3d) {
+                    // In 3D mode: single tap exits to cursor mode
+                    mode_3d = false;
+                    tap_code(axis_3d == 0 ? KC_F13 : KC_F15);
+                } else {
+                    toggle_drag_scroll();
+                }
                 break;
             case 2:
                 if (!mode_3d) {
