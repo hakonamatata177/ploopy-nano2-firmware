@@ -12,6 +12,8 @@ Restart=on-failure
 RestartSec=5
 # Show Python output immediately in journald instead of buffering
 Environment=PYTHONUNBUFFERED=1
+# Publish the spnav socket path so FreeCAD/Blender inherit it from this session
+Environment=SPNAV_SOCKET=%t/spnav.sock
 
 [Install]
 WantedBy=graphical-session.target

@@ -17,8 +17,19 @@ Modes
 -----
   cursor   – normal pointer movement (default)
   scroll   – trackball moves scroll wheel
-  rotate   – 3D orbit (RMB/MMB drag depending on app)
-  pan      – 3D pan  (MMB drag depending on app)
+  rotate   – 3D orbit via spnav (or cursor-drag fallback)
+  pan      – 3D pan  via spnav (or cursor-drag fallback)
+
+SpaceMouse socket (spnav)
+-------------------------
+When in rotate/pan mode the daemon serves the spacenavd Unix socket at
+SPNAV_SOCKET (default /run/spnav.sock).  FreeCAD, Blender (with the
+spacemouse plugin) and any libspnav-based app connects automatically and
+receives 6DOF motion events — no cursor movement involved, so there is no
+screen-edge problem and no cursor jumping.
+
+Set  SPNAV_SOCKET=/run/spnav.sock  in the systemd service environment
+(or export it in your shell) to override the default path.
 
 Config actions
 --------------
@@ -38,6 +49,7 @@ import asyncio
 import json
 import logging
 import os
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -193,6 +205,93 @@ def get_profile(window_class: str) -> dict:
             return PROFILES[name]
     return PROFILES["default"]
 
+# ─── SpaceMouse socket server (spnav protocol) ────────────────────────────────
+#
+# Wire format (spacenavd / libspnav compatible):
+#   Motion event  – 32 bytes: type=0 (int), x,y,z,rx,ry,rz (6 ints), period (uint)
+#   Button event  – 12 bytes: type=1 (int), press (int), bnum (int)
+#
+# FreeCAD and Blender connect to this socket via libspnav automatically when
+# SPNAV_SOCKET points here (or the default /run/spnav.sock exists).
+
+SPNAV_SOCKET = os.environ.get(
+    "SPNAV_SOCKET",
+    os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "spnav.sock"),
+)
+_MOTION_FMT  = "=iiiiiiII"   # type, x,y,z,rx,ry,rz, period  → 32 bytes
+_BUTTON_FMT  = "=iii"        # type, press, bnum              → 12 bytes
+
+class SpnavServer:
+    """Serves the spacenavd Unix socket so 3D apps receive 6DOF events."""
+
+    def __init__(self) -> None:
+        self._clients: list[asyncio.StreamWriter] = []
+        self._server: asyncio.Server | None = None
+
+    async def start(self) -> bool:
+        try:
+            try:
+                os.unlink(SPNAV_SOCKET)
+            except FileNotFoundError:
+                pass
+            Path(SPNAV_SOCKET).parent.mkdir(parents=True, exist_ok=True)
+            self._server = await asyncio.start_unix_server(
+                self._on_client, SPNAV_SOCKET)
+            os.chmod(SPNAV_SOCKET, 0o666)
+            log.info("SpaceMouse socket ready at %s", SPNAV_SOCKET)
+            return True
+        except Exception as ex:
+            log.warning("Could not create spnav socket at %s: %s — "
+                        "falling back to cursor-drag mode", SPNAV_SOCKET, ex)
+            return False
+
+    async def _on_client(self, reader: asyncio.StreamReader,
+                         writer: asyncio.StreamWriter) -> None:
+        peer = writer.get_extra_info("peername") or "client"
+        log.info("spnav: %s connected", peer)
+        self._clients.append(writer)
+        try:
+            while True:
+                data = await reader.read(64)
+                if not data:
+                    break
+        finally:
+            self._clients.remove(writer)
+            writer.close()
+            log.info("spnav: %s disconnected", peer)
+
+    def send_motion(self, x: int = 0, y: int = 0, z: int = 0,
+                    rx: int = 0, ry: int = 0, rz: int = 0) -> None:
+        if not self._clients:
+            return
+        data = struct.pack(_MOTION_FMT, 0, x, y, z, rx, ry, rz, 1)
+        self._write_all(data)
+
+    def send_button(self, bnum: int, press: bool) -> None:
+        data = struct.pack(_BUTTON_FMT, 1, int(press), bnum)
+        self._write_all(data)
+
+    def _write_all(self, data: bytes) -> None:
+        dead = []
+        for w in self._clients:
+            try:
+                w.write(data)
+            except Exception:
+                dead.append(w)
+        for w in dead:
+            try:
+                self._clients.remove(w)
+            except ValueError:
+                pass
+
+    async def stop(self) -> None:
+        if self._server:
+            self._server.close()
+        try:
+            os.unlink(SPNAV_SOCKET)
+        except Exception:
+            pass
+
 # ─── Daemon ───────────────────────────────────────────────────────────────────
 
 class SpaceMouseDaemon:
@@ -201,6 +300,8 @@ class SpaceMouseDaemon:
         self.devices = devices
         self.virtual = virtual
         self.config  = config
+        self.spnav   = SpnavServer()
+        self._spnav_active = False   # True once spnav socket is up and connected
 
         # Mode: "cursor" | "scroll" | "rotate" | "pan"
         self.mode = "cursor"
@@ -447,6 +548,22 @@ class SpaceMouseDaemon:
                 await self._handle_3d_movement(tick_x, tick_y)
 
     async def _handle_3d_movement(self, dx: int, dy: int) -> None:
+        scale = self._move_scale
+
+        # ── spnav path (preferred) ────────────────────────────────────────────
+        # Send 6DOF events directly to the app via the spacemouse socket.
+        # No cursor movement, no screen-edge problem, no warping.
+        if self.spnav._clients:
+            self._release_all()   # make sure no stale button holds
+            if self.mode == "rotate":
+                # dx → yaw (ry), dy → pitch (rx)
+                self.spnav.send_motion(rx=-dy * scale, ry=dx * scale)
+            elif self.mode == "pan":
+                # dx → tx, dy → ty (invert y for natural feel)
+                self.spnav.send_motion(x=dx * scale, y=-dy * scale)
+            return
+
+        # ── cursor-drag fallback (no spnav client connected) ─────────────────
         profile  = get_profile(get_active_window_class())
         axis_cfg = profile[self._axis]
 
@@ -458,24 +575,19 @@ class SpaceMouseDaemon:
                 self.virtual.write(e.EV_REL, e.REL_HWHEEL, dx)
             self.virtual.syn()
         else:
-            ms = self._move_scale
-            self._drift_x += dx * ms
-            self._drift_y += -dy * ms
+            self._drift_x += dx * scale
+            self._drift_y += -dy * scale
             if (abs(self._drift_x) > self._recenter_threshold or
                     abs(self._drift_y) > self._recenter_threshold):
                 self._release_all()
                 self.virtual.syn()
-                # Wait two Wayland frames so the button-release reaches
-                # FreeCAD before the cursor warp does.  Without this sleep
-                # the warp (a separate IPC path) can arrive while the app
-                # still thinks the button is held, causing a phantom pan.
-                await asyncio.sleep(0.04)
+                await asyncio.sleep(0.05)
                 self._center_cursor()
             self._hold(axis_cfg["buttons"], axis_cfg["mods"])
             if dx:
-                self.virtual.write(e.EV_REL, e.REL_X,  dx * ms)
+                self.virtual.write(e.EV_REL, e.REL_X,  dx * scale)
             if dy:
-                self.virtual.write(e.EV_REL, e.REL_Y, -dy * ms)
+                self.virtual.write(e.EV_REL, e.REL_Y, -dy * scale)
             self.virtual.syn()
 
     # ── Event loop ───────────────────────────────────────────────────────────
@@ -501,12 +613,14 @@ class SpaceMouseDaemon:
     async def run(self) -> None:
         log.info("Daemon running — grabbing %d mouse device(s).", len(self._mouse_devices))
         self._grab_all()
+        await self.spnav.start()
         tasks = [asyncio.create_task(self._read_device(d)) for d in self.devices]
         try:
             await asyncio.gather(*tasks)
         finally:
             self._release_all()
             self._ungrab_all()
+            await self.spnav.stop()
             for t in tasks:
                 t.cancel()
 
