@@ -7,7 +7,9 @@ Edit tap actions, navigation tuning, and firmware timing values.
 """
 
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -296,12 +298,60 @@ class MainWindow(QMainWindow):
             self._load_values()
 
 
+# ─── Self-install ──────────────────────────────────────────────────────────────
+
+INSTALL_BIN     = Path.home() / ".local" / "bin" / "spacemouse-config"
+INSTALL_DESKTOP = Path.home() / ".local" / "share" / "applications" / "spacemouse-config.desktop"
+
+def _offer_install(app: QApplication) -> None:
+    """If running as an AppImage and not yet installed, ask the user to install."""
+    appimage_src = os.environ.get("APPIMAGE")
+    if not appimage_src or INSTALL_DESKTOP.exists():
+        return  # not an AppImage, or already installed
+
+    reply = QMessageBox.question(
+        None,
+        "Install SpaceMouse Config",
+        "Install SpaceMouse Config to your system?\n\n"
+        "It will appear in your app launcher so you can open it anytime.",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+    )
+    if reply != QMessageBox.StandardButton.Yes:
+        return
+
+    try:
+        INSTALL_BIN.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(appimage_src, INSTALL_BIN)
+        INSTALL_BIN.chmod(0o755)
+
+        INSTALL_DESKTOP.parent.mkdir(parents=True, exist_ok=True)
+        INSTALL_DESKTOP.write_text(
+            "[Desktop Entry]\n"
+            "Name=SpaceMouse Config\n"
+            "Comment=Configure the Ploopy SpaceMouse daemon\n"
+            f"Exec={INSTALL_BIN}\n"
+            "Icon=preferences-system\n"
+            "Type=Application\n"
+            "Categories=Settings;Utility;\n"
+            "Keywords=ploopy;trackball;spacemouse;\n"
+        )
+        QMessageBox.information(
+            None,
+            "Installed",
+            "SpaceMouse Config installed!\n\n"
+            "You'll find it in your app launcher from now on.",
+        )
+    except Exception as ex:
+        QMessageBox.critical(None, "Install failed", str(ex))
+
+
 # ─── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("SpaceMouse Configuration")
     app.setApplicationDisplayName("SpaceMouse Configuration")
+    _offer_install(app)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
