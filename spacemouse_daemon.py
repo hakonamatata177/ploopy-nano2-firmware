@@ -45,6 +45,44 @@ import subprocess
 import sys
 from pathlib import Path
 
+# ─── Config ───────────────────────────────────────────────────────────────────
+
+CONFIG_PATH = Path.home() / ".config" / "spacemouse" / "config.json"
+
+_CONFIG_DEFAULTS: dict = {
+    "actions": {
+        "double_tap": "rotate",   # axis entered by 2-tap: rotate | pan | zoom
+        "triple_tap": "pan",      # axis entered by 3-tap: rotate | pan | zoom
+    },
+    "navigation": {
+        "move_scale": 14,
+        "recenter_threshold": 300,
+    },
+    "firmware": {
+        "hold_threshold_ms": 400,
+        "tap_timeout_ms": 150,
+        "scroll_divisor_3d": 10,
+    },
+}
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    out = base.copy()
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            out[k] = _deep_merge(base[k], v)
+        else:
+            out[k] = v
+    return out
+
+def load_config() -> dict:
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH) as f:
+                return _deep_merge(_CONFIG_DEFAULTS, json.load(f))
+        except Exception as ex:
+            logging.getLogger(__name__).warning("Could not read config: %s — using defaults", ex)
+    return _deep_merge(_CONFIG_DEFAULTS, {})
+
 import evdev
 from evdev import InputDevice, UInput, ecodes as e
 
@@ -65,20 +103,12 @@ log = logging.getLogger(__name__)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-AXIS_NAMES = ["Rotate XY", "Translate XY", "Zoom + Roll Z"]
-
-# How many virtual pixels to move the mouse per one scroll tick from firmware.
-# Increase if 3D navigation feels sluggish; decrease if it jumps too fast.
-MOVE_SCALE = 14
-
-# How far (px) the cursor may drift from center before we recenter.
-# At MOVE_SCALE=14 this is ~21 scroll ticks — several seconds of movement in
-# one direction — so the brief release/warp/repress happens rarely.
-RECENTER_THRESHOLD = 300
+AXIS_NAMES  = ["Rotate XY", "Translate XY", "Zoom + Roll Z"]
+ACTION_AXIS = {"rotate": 0, "pan": 1, "zoom": 2}
 
 # evdev key codes used by the firmware tap protocol
-KEY_F13 = e.KEY_F13   # 183 – double tap: toggle rotate mode (axis 0)
-KEY_F15 = e.KEY_F15   # 185 – triple tap: toggle pan mode    (axis 1)
+KEY_F13 = e.KEY_F13   # 183 – double tap
+KEY_F15 = e.KEY_F15   # 185 – triple tap
 
 # ─── Application profiles ─────────────────────────────────────────────────────
 #
@@ -208,9 +238,10 @@ class SpaceMouseDaemon:
     mouse actions via a virtual uinput device.
     """
 
-    def __init__(self, devices: list[InputDevice], virtual: UInput) -> None:
+    def __init__(self, devices: list[InputDevice], virtual: UInput, config: dict) -> None:
         self.devices = devices
         self.virtual = virtual
+        self.config   = config
         self.mode_3d  = False
         self.axis     = 0
         self._held_buttons: list[int] = []
@@ -218,6 +249,18 @@ class SpaceMouseDaemon:
         self._mouse_devices = [d for d in devices if e.EV_REL in d.capabilities()]
         self._drift_x = 0
         self._drift_y = 0
+
+    @property
+    def _move_scale(self) -> int:
+        return self.config["navigation"]["move_scale"]
+
+    @property
+    def _recenter_threshold(self) -> int:
+        return self.config["navigation"]["recenter_threshold"]
+
+    def _axis_for(self, key: str) -> int:
+        action = self.config["actions"].get(key, "rotate")
+        return ACTION_AXIS.get(action, 0)
 
     # ── Cursor centering ─────────────────────────────────────────────────────
 
@@ -333,19 +376,39 @@ class SpaceMouseDaemon:
             # warp back to center, then re-press. FreeCAD uses the re-press
             # position as its new reference point so orbit/pan continues
             # smoothly without any visible jump.
-            self._drift_x += dx * MOVE_SCALE
-            self._drift_y += -dy * MOVE_SCALE
-            if abs(self._drift_x) > RECENTER_THRESHOLD or \
-               abs(self._drift_y) > RECENTER_THRESHOLD:
+            ms = self._move_scale
+            self._drift_x += dx * ms
+            self._drift_y += -dy * ms
+            if abs(self._drift_x) > self._recenter_threshold or \
+               abs(self._drift_y) > self._recenter_threshold:
                 self._release_all()
                 self.virtual.syn()
                 self._center_cursor()  # also resets _drift_x/_drift_y
             self._hold(axis_cfg["buttons"], axis_cfg["mods"])
             if dx != 0:
-                self.virtual.write(e.EV_REL, e.REL_X,  dx * MOVE_SCALE)
+                self.virtual.write(e.EV_REL, e.REL_X,  dx * ms)
             if dy != 0:
-                self.virtual.write(e.EV_REL, e.REL_Y, -dy * MOVE_SCALE)
+                self.virtual.write(e.EV_REL, e.REL_Y, -dy * ms)
             self.virtual.syn()
+
+    # ── Tap intent handler ───────────────────────────────────────────────────
+
+    def _handle_tap_intent(self, target_axis: int) -> None:
+        """Enter/switch to target_axis, or exit if already on that axis."""
+        if self.mode_3d and self.axis == target_axis:
+            self.mode_3d = False
+            self._release_all()
+            self._set_grab(False)
+            log.info("3D mode OFF")
+        else:
+            entering = not self.mode_3d
+            self.mode_3d = True
+            self.axis = target_axis
+            self._release_all()
+            if entering:
+                self._set_grab(True)
+            self._center_cursor()
+            log.info("3D mode ON  (axis %d: %s)", target_axis, AXIS_NAMES[target_axis])
 
     # ── Event loop ───────────────────────────────────────────────────────────
 
@@ -354,40 +417,9 @@ class SpaceMouseDaemon:
         async for event in dev.async_read_loop():
             if event.type == e.EV_KEY and event.value == 1:  # key-down only
                 if event.code == KEY_F13:
-                    # Double tap: rotate intent
-                    # already rotating → exit; panning or off → enter/switch to rotate
-                    if self.mode_3d and self.axis == 0:
-                        self.mode_3d = False
-                        self._release_all()
-                        self._set_grab(False)
-                        log.info("3D mode OFF")
-                    else:
-                        entering = not self.mode_3d
-                        self.mode_3d = True
-                        self.axis = 0
-                        self._release_all()
-                        if entering:
-                            self._set_grab(True)
-                        self._center_cursor()
-                        log.info("3D mode ON  (axis 0: %s)", AXIS_NAMES[0])
-
+                    self._handle_tap_intent(self._axis_for("double_tap"))
                 elif event.code == KEY_F15:
-                    # Triple tap: pan intent
-                    # already panning → exit; rotating or off → enter/switch to pan
-                    if self.mode_3d and self.axis == 1:
-                        self.mode_3d = False
-                        self._release_all()
-                        self._set_grab(False)
-                        log.info("3D mode OFF")
-                    else:
-                        entering = not self.mode_3d
-                        self.mode_3d = True
-                        self.axis = 1
-                        self._release_all()
-                        if entering:
-                            self._set_grab(True)
-                        self._center_cursor()
-                        log.info("3D mode ON  (axis 1: %s)", AXIS_NAMES[1])
+                    self._handle_tap_intent(self._axis_for("triple_tap"))
 
             elif event.type == e.EV_REL and self.mode_3d:
                 dx, dy = 0, 0
@@ -434,7 +466,9 @@ async def main() -> None:
     device_path = virtual.device.path if virtual.device else f"fd={virtual.fd}"
     log.info("Virtual uinput device created: %s", device_path)
 
-    daemon = SpaceMouseDaemon(devices, virtual)
+    config = load_config()
+    log.info("Config loaded from %s", CONFIG_PATH if CONFIG_PATH.exists() else "defaults")
+    daemon = SpaceMouseDaemon(devices, virtual, config)
     try:
         await daemon.run()
     except KeyboardInterrupt:

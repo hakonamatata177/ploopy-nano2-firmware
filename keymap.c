@@ -17,10 +17,6 @@ static bool     scroll_mode     = false; // true while drag-scroll is active
 static bool     mode_3d         = false; // true while 3D mode is active (suppresses cursor)
 static uint8_t  axis_3d         = 0;     // 0 = rotate, 1 = pan
 
-// How many raw trackball counts to accumulate before emitting one scroll tick.
-// Higher = slower / less sensitive 3D movement. Tune to taste.
-#define SCROLL_DIVISOR_3D 10
-
 // ─── Keymap ───────────────────────────────────────────────────────────────────
 // The Nano 2 has a single button; it lives in layer 0.
 const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {

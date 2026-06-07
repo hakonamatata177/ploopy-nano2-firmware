@@ -19,3 +19,7 @@
 
 // Window (ms) after a tap to wait for an additional tap (for multi-tap detection)
 #define TAP_TIMEOUT 150
+
+// Raw trackball counts to accumulate per scroll tick in 3D mode.
+// Higher = slower / less sensitive. Tune to taste.
+#define SCROLL_DIVISOR_3D 10
