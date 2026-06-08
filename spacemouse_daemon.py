@@ -571,9 +571,9 @@ class SpaceMouseDaemon:
                 ry = (-dx if nav["invert_ry"] else  dx) * s
                 self.spnav.send_motion(rx=rx, ry=ry)
             elif self.mode == "pan":
-                px = (-dx if nav["invert_pan_x"] else dx) * s
-                py = ( dy if nav["invert_pan_y"] else -dy) * s
-                self.spnav.send_motion(x=px, y=py)
+                px = (-dx if nav["invert_pan_x"] else  dx) * s
+                pz = ( dy if nav["invert_pan_y"] else -dy) * s
+                self.spnav.send_motion(x=px, z=pz)  # z = up/down, y = depth
             return
 
         # ── cursor-drag fallback (no spnav client connected) ─────────────────
