@@ -185,6 +185,20 @@ def find_ploopy_devices() -> list[InputDevice]:
             pass
     return found
 
+def find_keyboard_devices() -> list[InputDevice]:
+    found = []
+    for path in evdev.list_devices():
+        try:
+            dev = InputDevice(path)
+            if e.EV_KEY in dev.capabilities() and e.KEY_LEFTCTRL in dev.capabilities()[e.EV_KEY]:
+                log.info("Found keyboard device: %s  (%s)", dev.name, path)
+                found.append(dev)
+        except PermissionError:
+            pass
+        except Exception:
+            pass
+    return found
+
 def create_virtual_device() -> UInput:
     caps = {
         e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE,
@@ -302,8 +316,9 @@ class SpnavServer:
 
 class SpaceMouseDaemon:
     def __init__(self, devices: list[InputDevice], virtual: UInput,
-                 config: dict) -> None:
+                 keyboard_devices: list[InputDevice], config: dict) -> None:
         self.devices = devices
+        self.keyboard_devices = keyboard_devices
         self.virtual = virtual
         self.config  = config
         self.spnav   = SpnavServer()
@@ -330,6 +345,9 @@ class SpaceMouseDaemon:
 
         # Previous rotation tick — used to derive roll from circular motion
         self._prev_rot: tuple[int, int] = (0, 0)
+
+        # Ctrl key state — Ctrl+X movement → roll (rz) in rotate mode
+        self._ctrl_held = False
 
     # ── Config helpers ───────────────────────────────────────────────────────
 
@@ -573,16 +591,23 @@ class SpaceMouseDaemon:
             s   = self._spnav_scale
             nav = self.config["navigation"]
             if self.mode == "rotate":
-                rx = (dy  if nav["invert_rx"] else -dy) * s
-                ry = (-dx if nav["invert_ry"] else  dx) * s
+                if self._ctrl_held:
+                    # Ctrl+X → roll, Y → pitch, no yaw
+                    rx = (dy  if nav["invert_rx"] else -dy) * s
+                    ry = 0
+                    rz = (-dx if nav["invert_ry"] else  dx) * s
+                else:
+                    # Normal: X → yaw, Y → pitch, circular → roll
+                    rx = (dy  if nav["invert_rx"] else -dy) * s
+                    ry = (-dx if nav["invert_ry"] else  dx) * s
 
-                # Roll from circular motion: cross product of consecutive
-                # movement vectors.  Moving in a straight line → cross = 0,
-                # pure pitch/yaw.  Tracing an arc → cross ≠ 0, adds roll.
-                prev_dx, prev_dy = self._prev_rot
-                cross = prev_dx * dy - prev_dy * dx
-                rz = int(cross * nav["roll_scale"] * s)
-                self._prev_rot = (dx, dy)
+                    # Roll from circular motion: cross product of consecutive
+                    # movement vectors.  Moving in a straight line → cross = 0,
+                    # pure pitch/yaw.  Tracing an arc → cross ≠ 0, adds roll.
+                    prev_dx, prev_dy = self._prev_rot
+                    cross = prev_dx * dy - prev_dy * dx
+                    rz = int(cross * nav["roll_scale"] * s)
+                    self._prev_rot = (dx, dy)
 
                 self.spnav.send_motion(rx=rx, ry=ry, rz=rz)
             elif self.mode == "pan":
@@ -618,6 +643,15 @@ class SpaceMouseDaemon:
                 self.virtual.write(e.EV_REL, e.REL_Y, -dy * scale)
             self.virtual.syn()
 
+    # ── Keyboard monitoring ────────────────────────────────────────────────────
+
+    async def _monitor_ctrl(self, dev: InputDevice) -> None:
+        """Monitor a keyboard device for Ctrl key events."""
+        async for event in dev.async_read_loop():
+            if event.type == e.EV_KEY and event.code == e.KEY_LEFTCTRL:
+                self._ctrl_held = bool(event.value)
+                log.debug("Ctrl %s", "pressed" if event.value else "released")
+
     # ── Event loop ───────────────────────────────────────────────────────────
 
     async def _read_device(self, dev: InputDevice) -> None:
@@ -643,6 +677,7 @@ class SpaceMouseDaemon:
         self._grab_all()
         await self.spnav.start()
         tasks = [asyncio.create_task(self._read_device(d)) for d in self.devices]
+        tasks += [asyncio.create_task(self._monitor_ctrl(d)) for d in self.keyboard_devices]
         try:
             await asyncio.gather(*tasks)
         finally:
@@ -668,6 +703,12 @@ async def main() -> None:
         )
         sys.exit(1)
 
+    keyboard_devices = find_keyboard_devices()
+    if keyboard_devices:
+        log.info("Found %d keyboard device(s) for Ctrl monitoring", len(keyboard_devices))
+    else:
+        log.warning("No keyboard devices found — Ctrl+X roll will not work")
+
     virtual = create_virtual_device()
     log.info("Virtual uinput device: %s",
              virtual.device.path if virtual.device else f"fd={virtual.fd}")
@@ -675,7 +716,7 @@ async def main() -> None:
     config = load_config()
     log.info("Config: %s", CONFIG_PATH if CONFIG_PATH.exists() else "defaults")
 
-    daemon = SpaceMouseDaemon(devices, virtual, config)
+    daemon = SpaceMouseDaemon(devices, virtual, keyboard_devices, config)
     try:
         await daemon.run()
     except KeyboardInterrupt:
