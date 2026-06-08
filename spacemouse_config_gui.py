@@ -17,9 +17,9 @@ from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFormLayout, QFrame, QGroupBox,
-    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
-    QSpinBox, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
+    QFrame, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+    QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 if sys.platform == "win32":
@@ -43,6 +43,7 @@ DEFAULTS: dict = {
         "spnav_scale":        150,
         "recenter_threshold": 300,
         "scroll_divisor":     10,
+        "roll_scale":         0.5,
         "invert_rx":          True,
         "invert_ry":          True,
         "invert_pan_x":       False,
@@ -187,6 +188,13 @@ class MainWindow(QMainWindow):
         self.recenter_sb    = _spinbox(50, 2000, "px drift from center")
         self.scroll_div_sb  = _spinbox(1,  100,  "raw counts per tick")
 
+        self.roll_scale_sb  = QDoubleSpinBox()
+        self.roll_scale_sb.setRange(0.0, 5.0)
+        self.roll_scale_sb.setSingleStep(0.1)
+        self.roll_scale_sb.setDecimals(1)
+        self.roll_scale_sb.setSuffix("  ×  (0 = off)")
+        self.roll_scale_sb.setMinimumWidth(160)
+
         self.invert_rx_cb    = QCheckBox("Invert rotate pitch  (up/down)")
         self.invert_ry_cb    = QCheckBox("Invert rotate yaw  (left/right)")
         self.invert_pan_x_cb = QCheckBox("Invert pan left/right")
@@ -196,6 +204,7 @@ class MainWindow(QMainWindow):
         nav_form.addRow("SpNav scale",     self.spnav_scale_sb)
         nav_form.addRow("Recenter at",     self.recenter_sb)
         nav_form.addRow("Scroll divisor",  self.scroll_div_sb)
+        nav_form.addRow("Roll sensitivity", self.roll_scale_sb)
         nav_form.addRow("",                self.invert_rx_cb)
         nav_form.addRow("",                self.invert_ry_cb)
         nav_form.addRow("",                self.invert_pan_x_cb)
@@ -242,6 +251,7 @@ class MainWindow(QMainWindow):
         self.spnav_scale_sb.setValue(c["navigation"]["spnav_scale"])
         self.recenter_sb.setValue(c["navigation"]["recenter_threshold"])
         self.scroll_div_sb.setValue(c["navigation"]["scroll_divisor"])
+        self.roll_scale_sb.setValue(c["navigation"]["roll_scale"])
         self.invert_rx_cb.setChecked(c["navigation"]["invert_rx"])
         self.invert_ry_cb.setChecked(c["navigation"]["invert_ry"])
         self.invert_pan_x_cb.setChecked(c["navigation"]["invert_pan_x"])
@@ -264,6 +274,7 @@ class MainWindow(QMainWindow):
                 "spnav_scale":        self.spnav_scale_sb.value(),
                 "recenter_threshold": self.recenter_sb.value(),
                 "scroll_divisor":     self.scroll_div_sb.value(),
+                "roll_scale":         self.roll_scale_sb.value(),
                 "invert_rx":          self.invert_rx_cb.isChecked(),
                 "invert_ry":          self.invert_ry_cb.isChecked(),
                 "invert_pan_x":       self.invert_pan_x_cb.isChecked(),

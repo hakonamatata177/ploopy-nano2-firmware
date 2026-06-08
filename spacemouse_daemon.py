@@ -80,10 +80,11 @@ DEFAULTS: dict = {
         "spnav_scale":        150,
         "recenter_threshold": 300,
         "scroll_divisor":     10,
-        "invert_rx":          True,   # pitch — flip for object-in-hand vs camera feel
-        "invert_ry":          True,   # yaw   — flip for object-in-hand vs camera feel
+        "invert_rx":          True,
+        "invert_ry":          True,
         "invert_pan_x":       False,
         "invert_pan_y":       False,
+        "roll_scale":         0.5,   # multiplier on the circular-motion roll signal
     },
 }
 
@@ -325,7 +326,10 @@ class SpaceMouseDaemon:
         self._tap_count       = 0
         self._press_time: float = 0.0
         self._tap_task: asyncio.Task | None = None
-        self._pre_tap_mode: str = "cursor"   # mode before optimistic single tap
+        self._pre_tap_mode: str = "cursor"
+
+        # Previous rotation tick — used to derive roll from circular motion
+        self._prev_rot: tuple[int, int] = (0, 0)
 
     # ── Config helpers ───────────────────────────────────────────────────────
 
@@ -434,6 +438,8 @@ class SpaceMouseDaemon:
 
         if new_mode in ("rotate", "pan"):
             self._center_cursor()
+        if new_mode == "rotate" or old_mode == "rotate":
+            self._prev_rot = (0, 0)
 
         log.info("Mode: %s → %s", old_mode, new_mode)
 
@@ -564,16 +570,25 @@ class SpaceMouseDaemon:
         # No cursor movement, no screen-edge problem, no warping.
         if self.spnav._clients:
             self._release_all()
-            s  = self._spnav_scale
+            s   = self._spnav_scale
             nav = self.config["navigation"]
             if self.mode == "rotate":
                 rx = (dy  if nav["invert_rx"] else -dy) * s
                 ry = (-dx if nav["invert_ry"] else  dx) * s
-                self.spnav.send_motion(rx=rx, ry=ry)
+
+                # Roll from circular motion: cross product of consecutive
+                # movement vectors.  Moving in a straight line → cross = 0,
+                # pure pitch/yaw.  Tracing an arc → cross ≠ 0, adds roll.
+                prev_dx, prev_dy = self._prev_rot
+                cross = prev_dx * dy - prev_dy * dx
+                rz = int(cross * nav["roll_scale"] * s)
+                self._prev_rot = (dx, dy)
+
+                self.spnav.send_motion(rx=rx, ry=ry, rz=rz)
             elif self.mode == "pan":
                 px = (-dx if nav["invert_pan_x"] else  dx) * s
                 pz = ( dy if nav["invert_pan_y"] else -dy) * s
-                self.spnav.send_motion(x=px, z=pz)  # z = up/down, y = depth
+                self.spnav.send_motion(x=px, z=pz)
             return
 
         # ── cursor-drag fallback (no spnav client connected) ─────────────────
