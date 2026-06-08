@@ -224,7 +224,7 @@ SPNAV_SOCKET = os.environ.get(
     "SPNAV_SOCKET",
     os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "spnav.sock"),
 )
-_MOTION_FMT  = "=iiiiiiII"   # type, x,y,z,rx,ry,rz, period  → 32 bytes
+_MOTION_FMT  = "=iiiiiiii"   # type, x,y,z,rx,ry,rz, period  → 32 bytes (all signed)
 _BUTTON_FMT  = "=iii"        # type, press, bnum              → 12 bytes
 
 class SpnavServer:
