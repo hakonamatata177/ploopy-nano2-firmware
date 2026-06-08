@@ -80,6 +80,10 @@ DEFAULTS: dict = {
         "spnav_scale":        150,
         "recenter_threshold": 300,
         "scroll_divisor":     10,
+        "invert_rx":          True,   # pitch — flip for object-in-hand vs camera feel
+        "invert_ry":          True,   # yaw   — flip for object-in-hand vs camera feel
+        "invert_pan_x":       False,
+        "invert_pan_y":       False,
     },
 }
 
@@ -560,11 +564,16 @@ class SpaceMouseDaemon:
         # No cursor movement, no screen-edge problem, no warping.
         if self.spnav._clients:
             self._release_all()
-            s = self._spnav_scale
+            s  = self._spnav_scale
+            nav = self.config["navigation"]
             if self.mode == "rotate":
-                self.spnav.send_motion(rx=-dy * s, ry=dx * s)
+                rx = (dy  if nav["invert_rx"] else -dy) * s
+                ry = (-dx if nav["invert_ry"] else  dx) * s
+                self.spnav.send_motion(rx=rx, ry=ry)
             elif self.mode == "pan":
-                self.spnav.send_motion(x=dx * s, y=-dy * s)
+                px = (-dx if nav["invert_pan_x"] else dx) * s
+                py = ( dy if nav["invert_pan_y"] else -dy) * s
+                self.spnav.send_motion(x=px, y=py)
             return
 
         # ── cursor-drag fallback (no spnav client connected) ─────────────────

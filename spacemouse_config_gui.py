@@ -17,7 +17,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFormLayout, QFrame, QGroupBox,
+    QApplication, QCheckBox, QComboBox, QFormLayout, QFrame, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QSpinBox, QVBoxLayout, QWidget,
 )
@@ -43,6 +43,10 @@ DEFAULTS: dict = {
         "spnav_scale":        150,
         "recenter_threshold": 300,
         "scroll_divisor":     10,
+        "invert_rx":          True,
+        "invert_ry":          True,
+        "invert_pan_x":       False,
+        "invert_pan_y":       False,
     },
 }
 
@@ -183,10 +187,19 @@ class MainWindow(QMainWindow):
         self.recenter_sb    = _spinbox(50, 2000, "px drift from center")
         self.scroll_div_sb  = _spinbox(1,  100,  "raw counts per tick")
 
+        self.invert_rx_cb    = QCheckBox("Invert rotate pitch  (up/down)")
+        self.invert_ry_cb    = QCheckBox("Invert rotate yaw  (left/right)")
+        self.invert_pan_x_cb = QCheckBox("Invert pan left/right")
+        self.invert_pan_y_cb = QCheckBox("Invert pan up/down")
+
         nav_form.addRow("Move scale",      self.move_scale_sb)
         nav_form.addRow("SpNav scale",     self.spnav_scale_sb)
         nav_form.addRow("Recenter at",     self.recenter_sb)
         nav_form.addRow("Scroll divisor",  self.scroll_div_sb)
+        nav_form.addRow("",                self.invert_rx_cb)
+        nav_form.addRow("",                self.invert_ry_cb)
+        nav_form.addRow("",                self.invert_pan_x_cb)
+        nav_form.addRow("",                self.invert_pan_y_cb)
 
         layout.addLayout(nav_form)
         layout.addWidget(_separator())
@@ -229,6 +242,10 @@ class MainWindow(QMainWindow):
         self.spnav_scale_sb.setValue(c["navigation"]["spnav_scale"])
         self.recenter_sb.setValue(c["navigation"]["recenter_threshold"])
         self.scroll_div_sb.setValue(c["navigation"]["scroll_divisor"])
+        self.invert_rx_cb.setChecked(c["navigation"]["invert_rx"])
+        self.invert_ry_cb.setChecked(c["navigation"]["invert_ry"])
+        self.invert_pan_x_cb.setChecked(c["navigation"]["invert_pan_x"])
+        self.invert_pan_y_cb.setChecked(c["navigation"]["invert_pan_y"])
 
     def _collect(self) -> dict:
         return {
@@ -247,6 +264,10 @@ class MainWindow(QMainWindow):
                 "spnav_scale":        self.spnav_scale_sb.value(),
                 "recenter_threshold": self.recenter_sb.value(),
                 "scroll_divisor":     self.scroll_div_sb.value(),
+                "invert_rx":          self.invert_rx_cb.isChecked(),
+                "invert_ry":          self.invert_ry_cb.isChecked(),
+                "invert_pan_x":       self.invert_pan_x_cb.isChecked(),
+                "invert_pan_y":       self.invert_pan_y_cb.isChecked(),
             },
         }
 
