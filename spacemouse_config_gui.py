@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""
-spacemouse_config_gui.py
-========================
-Config GUI for the Ploopy SpaceMouse daemon.
-Edit tap actions, navigation tuning, and firmware timing values.
-"""
 
 import json
 import os
@@ -57,8 +51,6 @@ ACTION_LABELS = ["Toggle scroll ↔ cursor", "3D rotate (orbit)",
 KEY_TO_IDX    = {k: i for i, k in enumerate(ACTION_KEYS)}
 
 
-# ─── Config helpers ────────────────────────────────────────────────────────────
-
 def _deep_merge(base: dict, override: dict) -> dict:
     out = base.copy()
     for k, v in override.items():
@@ -82,8 +74,6 @@ def save_config(cfg: dict) -> None:
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=2)
 
-
-# ─── Widgets ───────────────────────────────────────────────────────────────────
 
 def _separator() -> QFrame:
     line = QFrame()
@@ -120,8 +110,6 @@ def _spinbox(lo: int, hi: int, suffix: str) -> QSpinBox:
     return sb
 
 
-# ─── Main window ───────────────────────────────────────────────────────────────
-
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -146,7 +134,6 @@ class MainWindow(QMainWindow):
             cb.setMinimumWidth(200)
             return cb
 
-        # ── Button Actions ────────────────────────────────────────────────────
         layout.addWidget(_section_label("Button Actions"))
         act_form = QFormLayout()
         act_form.setSpacing(8)
@@ -164,7 +151,6 @@ class MainWindow(QMainWindow):
         layout.addLayout(act_form)
         layout.addWidget(_separator())
 
-        # ── Timing ───────────────────────────────────────────────────────────
         layout.addWidget(_section_label("Timing"))
         timing_form = QFormLayout()
         timing_form.setSpacing(8)
@@ -178,7 +164,6 @@ class MainWindow(QMainWindow):
         layout.addLayout(timing_form)
         layout.addWidget(_separator())
 
-        # ── Navigation ────────────────────────────────────────────────────────
         layout.addWidget(_section_label("Navigation"))
         nav_form = QFormLayout()
         nav_form.setSpacing(8)
@@ -213,7 +198,6 @@ class MainWindow(QMainWindow):
         layout.addLayout(nav_form)
         layout.addWidget(_separator())
 
-        # ── Buttons ───────────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
@@ -236,8 +220,6 @@ class MainWindow(QMainWindow):
         btn_row.addStretch()
         btn_row.addWidget(reset_btn)
         layout.addLayout(btn_row)
-
-    # ── Data binding ──────────────────────────────────────────────────────────
 
     def _load_values(self) -> None:
         c = self.cfg
@@ -282,8 +264,6 @@ class MainWindow(QMainWindow):
             },
         }
 
-    # ── Actions ───────────────────────────────────────────────────────────────
-
     def _on_apply(self) -> None:
         cfg = self._collect()
         save_config(cfg)
@@ -311,7 +291,6 @@ class MainWindow(QMainWindow):
                                  f"Firmware repo not found at:\n{FIRMWARE_DIR}")
             return
 
-        # Auto-increment version tag
         res = subprocess.run(
             ["git", "describe", "--tags", "--abbrev=0"],
             cwd=FIRMWARE_DIR, capture_output=True, text=True,
@@ -335,7 +314,6 @@ class MainWindow(QMainWindow):
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            # Commit any uncommitted changes first (e.g. keymap tweaks)
             dirty = subprocess.run(
                 ["git", "status", "--porcelain"],
                 cwd=FIRMWARE_DIR, capture_output=True, text=True,
@@ -380,16 +358,13 @@ class MainWindow(QMainWindow):
             self._load_values()
 
 
-# ─── Self-install ──────────────────────────────────────────────────────────────
-
 INSTALL_BIN     = Path.home() / ".local" / "bin" / "spacemouse-config"
 INSTALL_DESKTOP = Path.home() / ".local" / "share" / "applications" / "spacemouse-config.desktop"
 
 def _offer_install(app: QApplication) -> None:
-    """If running as an AppImage and not yet installed, ask the user to install."""
     appimage_src = os.environ.get("APPIMAGE")
     if not appimage_src or INSTALL_DESKTOP.exists():
-        return  # not an AppImage, or already installed
+        return
 
     reply = QMessageBox.question(
         None,
@@ -426,8 +401,6 @@ def _offer_install(app: QApplication) -> None:
     except Exception as ex:
         QMessageBox.critical(None, "Install failed", str(ex))
 
-
-# ─── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
     app = QApplication(sys.argv)

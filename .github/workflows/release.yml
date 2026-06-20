@@ -47,9 +47,6 @@ jobs:
           name: firmware
           path: firmware.uf2
 
-  # ── Shared AppImage build step (reused by both AppImage jobs) ──────────────
-  # (inline; each job does its own build to avoid cross-job artifact confusion)
-
   # ── Build daemon AppImage ──────────────────────────────────────────────────
   build-daemon-appimage:
     runs-on: ubuntu-22.04

@@ -1,49 +1,4 @@
 #!/usr/bin/env python3
-"""
-spacemouse_daemon.py
-====================
-Converts a Ploopy Nano 2 trackball into a configurable 3D-navigation device.
-
-Firmware protocol (minimal firmware, never needs reflashing)
-------------------------------------------------------------
-The QMK firmware sends a single signal:
-  F13 key-down   →  button pressed
-  F13 key-up     →  button released
-
-All tap counting, hold detection, mode switching, and movement routing
-is handled here in the daemon, driven by ~/.config/spacemouse/config.json.
-
-Modes
------
-  cursor   – normal pointer movement (default)
-  scroll   – trackball moves scroll wheel
-  rotate   – 3D orbit via spnav (or cursor-drag fallback)
-  pan      – 3D pan  via spnav (or cursor-drag fallback)
-
-SpaceMouse socket (spnav)
--------------------------
-When in rotate/pan mode the daemon serves the spacenavd Unix socket at
-SPNAV_SOCKET (default /run/spnav.sock).  FreeCAD, Blender (with the
-spacemouse plugin) and any libspnav-based app connects automatically and
-receives 6DOF motion events — no cursor movement involved, so there is no
-screen-edge problem and no cursor jumping.
-
-Set  SPNAV_SOCKET=/run/spnav.sock  in the systemd service environment
-(or export it in your shell) to override the default path.
-
-Config actions
---------------
-  scroll_toggle  – switch between cursor and scroll
-  rotate         – enter/exit rotate mode
-  pan            – enter/exit pan mode
-  exit_3d        – exit any 3D mode back to cursor
-  nothing        – ignore
-
-Usage
------
-  python spacemouse_daemon.py          # foreground
-  systemctl --user start spacemouse   # as service
-"""
 
 import asyncio
 import json
@@ -56,8 +11,6 @@ from pathlib import Path
 
 import evdev
 from evdev import InputDevice, UInput, ecodes as e
-
-# ─── Config ───────────────────────────────────────────────────────────────────
 
 if sys.platform == "win32":
     CONFIG_PATH = Path.home() / "AppData" / "Roaming" / "spacemouse" / "config.json"
@@ -84,7 +37,7 @@ DEFAULTS: dict = {
         "invert_ry":          True,
         "invert_pan_x":       False,
         "invert_pan_y":       False,
-        "roll_scale":         0.5,   # multiplier on the circular-motion roll signal
+        "roll_scale":         0.5,
     },
 }
 
@@ -107,8 +60,6 @@ def load_config() -> dict:
                 "Could not read config: %s — using defaults", ex)
     return _deep_merge(DEFAULTS, {})
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
-
 LOG_DIR = Path.home() / ".local" / "share" / "spacemouse-daemon"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -122,13 +73,9 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ─── Constants ────────────────────────────────────────────────────────────────
-
-KEY_F13     = e.KEY_F13   # button press/release signal from firmware
+KEY_F13     = e.KEY_F13
 AXIS_NAMES  = {"rotate": "Rotate XY", "pan": "Translate XY"}
 ACTION_AXIS = {"rotate": 0, "pan": 1, "zoom": 2}
-
-# ─── Application profiles ─────────────────────────────────────────────────────
 
 PROFILES: dict[str, dict] = {
     "freecad": {
@@ -165,8 +112,6 @@ WINDOW_CLASS_TO_PROFILE: dict[str, str] = {
     "fusion360":  "fusion",
     "fusion":     "fusion",
 }
-
-# ─── Device helpers ───────────────────────────────────────────────────────────
 
 def find_ploopy_devices() -> list[InputDevice]:
     found = []
@@ -207,8 +152,6 @@ def create_virtual_device() -> UInput:
     }
     return UInput(caps, name="spacemouse-virtual", version=0x3)
 
-# ─── Window detection ─────────────────────────────────────────────────────────
-
 def get_active_window_class() -> str:
     try:
         result = subprocess.run(
@@ -225,24 +168,14 @@ def get_profile(window_class: str) -> dict:
             return PROFILES[name]
     return PROFILES["default"]
 
-# ─── SpaceMouse socket server (spnav protocol) ────────────────────────────────
-#
-# Wire format (spacenavd / libspnav compatible):
-#   Motion event  – 32 bytes: type=0 (int), x,y,z,rx,ry,rz (6 ints), period (uint)
-#   Button event  – 12 bytes: type=1 (int), press (int), bnum (int)
-#
-# FreeCAD and Blender connect to this socket via libspnav automatically when
-# SPNAV_SOCKET points here (or the default /run/spnav.sock exists).
-
 SPNAV_SOCKET = os.environ.get(
     "SPNAV_SOCKET",
     os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "spnav.sock"),
 )
-_MOTION_FMT  = "=iiiiiiii"   # type, x,y,z,rx,ry,rz, period  → 32 bytes (all signed)
-_BUTTON_FMT  = "=iii"        # type, press, bnum              → 12 bytes
+_MOTION_FMT  = "=iiiiiiii"
+_BUTTON_FMT  = "=iii"
 
 class SpnavServer:
-    """Serves the spacenavd Unix socket so 3D apps receive 6DOF events."""
 
     def __init__(self) -> None:
         self._clients: list[asyncio.StreamWriter] = []
@@ -312,8 +245,6 @@ class SpnavServer:
         except Exception:
             pass
 
-# ─── Daemon ───────────────────────────────────────────────────────────────────
-
 class SpaceMouseDaemon:
     def __init__(self, devices: list[InputDevice], virtual: UInput,
                  keyboard_devices: list[InputDevice], config: dict) -> None:
@@ -322,34 +253,27 @@ class SpaceMouseDaemon:
         self.virtual = virtual
         self.config  = config
         self.spnav   = SpnavServer()
-        self._spnav_active = False   # True once spnav socket is up and connected
+        self._spnav_active = False
 
-        # Mode: "cursor" | "scroll" | "rotate" | "pan"
         self.mode = "cursor"
 
         self._held_buttons: list[int] = []
         self._held_mods:    list[int] = []
         self._mouse_devices = [d for d in devices if e.EV_REL in d.capabilities()]
 
-        # Movement accumulators
         self._accum_x = 0
         self._accum_y = 0
         self._drift_x = 0
         self._drift_y = 0
 
-        # Tap counting state
         self._tap_count       = 0
         self._press_time: float = 0.0
         self._tap_task: asyncio.Task | None = None
         self._pre_tap_mode: str = "cursor"
 
-        # Previous rotation tick — used to derive roll from circular motion
         self._prev_rot: tuple[int, int] = (0, 0)
 
-        # Ctrl key state — Ctrl+X movement → roll (rz) in rotate mode
         self._ctrl_held = False
-
-    # ── Config helpers ───────────────────────────────────────────────────────
 
     @property
     def _hold_threshold(self) -> float:
@@ -379,8 +303,6 @@ class SpaceMouseDaemon:
     def _axis(self) -> int:
         return ACTION_AXIS.get(self.mode, 0)
 
-    # ── Cursor ───────────────────────────────────────────────────────────────
-
     def _center_cursor(self) -> None:
         try:
             result = subprocess.run(
@@ -399,8 +321,6 @@ class SpaceMouseDaemon:
             log.debug("Cursor centred at (%d, %d)", cx, cy)
         except Exception:
             pass
-
-    # ── Virtual device helpers ───────────────────────────────────────────────
 
     def _release_all(self) -> None:
         for btn in self._held_buttons:
@@ -425,8 +345,6 @@ class SpaceMouseDaemon:
         self._held_buttons = list(buttons)
         self._held_mods    = list(mods)
 
-    # ── Grab ────────────────────────────────────────────────────────────────
-
     def _grab_all(self) -> None:
         for dev in self._mouse_devices:
             try:
@@ -442,8 +360,6 @@ class SpaceMouseDaemon:
                 log.info("Released %s", dev.path)
             except Exception:
                 pass
-
-    # ── Mode switching ───────────────────────────────────────────────────────
 
     def _set_mode(self, new_mode: str) -> None:
         old_mode = self.mode
@@ -468,7 +384,7 @@ class SpaceMouseDaemon:
             elif self.mode == "cursor":
                 self._set_mode("scroll")
             else:
-                self._set_mode("cursor")   # exit 3D → cursor
+                self._set_mode("cursor")
         elif action == "rotate":
             self._set_mode("cursor" if self.mode == "rotate" else "rotate")
         elif action == "pan":
@@ -476,12 +392,8 @@ class SpaceMouseDaemon:
         elif action == "exit_3d":
             if self.mode not in ("cursor", "scroll"):
                 self._set_mode("cursor")
-        # "nothing" → no-op
-
-    # ── Tap counting ─────────────────────────────────────────────────────────
 
     async def _on_button_press(self, ts: float) -> None:
-        # Cancel any pending tap confirmation timer — a new press has arrived
         if self._tap_task:
             self._tap_task.cancel()
             self._tap_task = None
@@ -491,7 +403,6 @@ class SpaceMouseDaemon:
         duration = ts - self._press_time
 
         if duration >= self._hold_threshold:
-            # Long press — fire hold action immediately, reset tap state
             self._tap_count = 0
             action = self.config["actions"].get("hold", "exit_3d")
             self._apply_action(action)
@@ -501,9 +412,6 @@ class SpaceMouseDaemon:
         self._tap_count += 1
 
         if self._tap_count == 1:
-            # Optimistic: fire single tap immediately so there is zero delay.
-            # If a second tap arrives within the timeout window we undo this
-            # and let the multi-tap timer handle the final count instead.
             self._pre_tap_mode = self.mode
             action = self.config["actions"].get("tap_1", "scroll_toggle")
             self._apply_action(action)
@@ -511,17 +419,14 @@ class SpaceMouseDaemon:
             self._tap_task = asyncio.create_task(
                 self._tap_confirmed(self._tap_timeout))
         else:
-            # Second (or third) tap arrived — undo the optimistic single tap
-            # and start the normal timer to wait for the final count.
             if self._tap_task:
                 self._tap_task.cancel()
                 self._tap_task = None
-            self._set_mode(self._pre_tap_mode)   # undo single tap
+            self._set_mode(self._pre_tap_mode)
             self._tap_task = asyncio.create_task(
                 self._tap_timer(self._tap_timeout))
 
     async def _tap_confirmed(self, delay: float) -> None:
-        """Single tap was not followed by another press — it stands."""
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
@@ -530,7 +435,6 @@ class SpaceMouseDaemon:
         self._tap_task  = None
 
     async def _tap_timer(self, delay: float) -> None:
-        """Multi-tap: fire action once no more taps arrive within delay."""
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
@@ -542,8 +446,6 @@ class SpaceMouseDaemon:
         action = self.config["actions"].get(key, "nothing")
         self._apply_action(action)
         log.info("Tap ×%d → %s", count, action)
-
-    # ── Movement routing ─────────────────────────────────────────────────────
 
     async def _handle_raw_movement(self, dx: int, dy: int) -> None:
         if self.mode == "cursor":
@@ -583,27 +485,19 @@ class SpaceMouseDaemon:
     async def _handle_3d_movement(self, dx: int, dy: int) -> None:
         scale = self._move_scale
 
-        # ── spnav path (preferred) ────────────────────────────────────────────
-        # Send 6DOF events directly to the app via the spacemouse socket.
-        # No cursor movement, no screen-edge problem, no warping.
         if self.spnav._clients:
             self._release_all()
             s   = self._spnav_scale
             nav = self.config["navigation"]
             if self.mode == "rotate":
                 if self._ctrl_held:
-                    # Ctrl+X → roll, Y → pitch, no yaw
                     rx = (dy  if nav["invert_rx"] else -dy) * s
                     ry = 0
                     rz = (-dx if nav["invert_ry"] else  dx) * s
                 else:
-                    # Normal: X → yaw, Y → pitch, circular → roll
                     rx = (dy  if nav["invert_rx"] else -dy) * s
                     ry = (-dx if nav["invert_ry"] else  dx) * s
 
-                    # Roll from circular motion: cross product of consecutive
-                    # movement vectors.  Moving in a straight line → cross = 0,
-                    # pure pitch/yaw.  Tracing an arc → cross ≠ 0, adds roll.
                     prev_dx, prev_dy = self._prev_rot
                     cross = prev_dx * dy - prev_dy * dx
                     rz = int(cross * nav["roll_scale"] * s)
@@ -616,7 +510,6 @@ class SpaceMouseDaemon:
                 self.spnav.send_motion(x=px, z=pz)
             return
 
-        # ── cursor-drag fallback (no spnav client connected) ─────────────────
         profile  = get_profile(get_active_window_class())
         axis_cfg = profile[self._axis]
 
@@ -643,16 +536,11 @@ class SpaceMouseDaemon:
                 self.virtual.write(e.EV_REL, e.REL_Y, -dy * scale)
             self.virtual.syn()
 
-    # ── Keyboard monitoring ────────────────────────────────────────────────────
-
     async def _monitor_ctrl(self, dev: InputDevice) -> None:
-        """Monitor a keyboard device for Ctrl key events."""
         async for event in dev.async_read_loop():
             if event.type == e.EV_KEY and event.code == e.KEY_LEFTCTRL:
                 self._ctrl_held = bool(event.value)
                 log.debug("Ctrl %s", "pressed" if event.value else "released")
-
-    # ── Event loop ───────────────────────────────────────────────────────────
 
     async def _read_device(self, dev: InputDevice) -> None:
         async for event in dev.async_read_loop():
@@ -686,8 +574,6 @@ class SpaceMouseDaemon:
             await self.spnav.stop()
             for t in tasks:
                 t.cancel()
-
-# ─── Entry point ──────────────────────────────────────────────────────────────
 
 async def main() -> None:
     log.info("spacemouse-daemon starting")
